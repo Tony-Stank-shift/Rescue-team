@@ -15,6 +15,10 @@ from .decision_engine import (
 from .target_selector import (
     TargetSelector, StrategyState, ScoredTarget,
 )
+from .opponent_strategy import (
+    OpponentStrategy, ThreatLevel, OpponentBehavior,
+    StrategyAction, StrategyDecision,
+)
 from .anomaly_handler import (
     AnomalyHandler, AnomalyType, AnomalyReport, RecoveryAction,
 )
@@ -22,5 +26,7 @@ from .anomaly_handler import (
 __all__ = [
     "DecisionEngine", "Action", "ActionType",
     "TargetSelector", "StrategyState", "ScoredTarget",
-    "AnomalyHandler", "AnomalyType", "AnomalyReport", "RecoveryAction",
+    AnomalyHandler, AnomalyType, AnomalyReport, RecoveryAction,
+    OpponentStrategy, ThreatLevel, OpponentBehavior,
+    StrategyAction, StrategyDecision,
 ]
