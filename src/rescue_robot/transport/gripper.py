@@ -143,6 +143,19 @@ class MockGripper(AbstractGripper):
             logger.debug("夹取失败：范围内无目标")
             return False
 
+    def close_with_retry(self, target_positions=None, max_retries=3) -> bool:
+        """带重试的夹取"""
+        import time
+        for attempt in range(1, max_retries + 1):
+            self.open()
+            success = self.close(target_positions)
+            if success:
+                return True
+            logger.warning("夹取重试 %d/%d", attempt, max_retries)
+            time.sleep(0.3)
+        logger.error("夹取失败（%d次重试后）", max_retries)
+        return False
+
     def release(self) -> bool:
         """释放所有夹持目标"""
         if self._state.action == GripperAction.OPEN:

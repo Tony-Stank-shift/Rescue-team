@@ -115,6 +115,44 @@ class TransportPipeline:
         return self._placer
 
     @property
+    def compute_approach(self, robot_pose, target):
+        """
+        计算最优接近策略。
+
+        Returns dict with approach_angle, speed, distance, side_offset.
+        """
+        import math
+        rx, ry, rtheta = robot_pose
+        tx, ty = target.position
+        dx, dy = tx - rx, ty - ry
+        dist = math.sqrt(dx*dx + dy*dy)
+        target_angle = math.atan2(dy, dx)
+
+        # 速度递减：远快近慢
+        if dist > 1000:
+            speed = 800
+        elif dist > 300:
+            speed = 500
+        elif dist > 100:
+            speed = 200
+        else:
+            speed = 100
+
+        # 伤员从侧面接近（避免碰撞伤员）
+        side_offset = 0.0
+        if hasattr(target.info, 'type') and target.info.type.name == 'INJURED':
+            side_offset = 0.3
+            approach_angle = target_angle + (0.5 if ty > ry else -0.5)
+        else:
+            approach_angle = target_angle
+
+        return {
+            'approach_angle': approach_angle,
+            'speed': speed,
+            'distance': dist,
+            'side_offset': side_offset,
+        }
+
     def is_idle(self) -> bool:
         return self._phase in (TransportPhase.IDLE, TransportPhase.COMPLETE)
 
@@ -183,7 +221,7 @@ class TransportPipeline:
                 # 构建目标位置
                 positions = {t.id: t.position for t in self._current_targets}
                 # 闭合夹爪
-                success = self._gripper.close(positions)
+                success = self._gripper.close_with_retry(positions, max_retries=3)
                 if success:
                     for t in self._current_targets:
                         ok, v = self._load_mgr.load(t.info, t.id)
@@ -192,6 +230,10 @@ class TransportPipeline:
                             return self._get_status()
                     self._phase = TransportPhase.TRANSPORTING
                     logger.info("夹取完成，开始运送")
+                else:
+                    logger.error("夹取失败: 放弃本趟转运")
+                    self._phase = TransportPhase.IDLE
+                    self._current_targets.clear()
             # 夹爪已闭合时继续
 
         elif self._phase == TransportPhase.TRANSPORTING:

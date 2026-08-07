@@ -31,6 +31,10 @@ from .field_elements import (
 )
 from .opponent_tracker import OpponentTracker, OpponentState
 from .sensor_fusion import SensorFusion, FusedObservation, IMUReading, OdomReading
+from .field_detector import (
+    AbstractFieldDetector, MockFieldDetector, CVFieldDetector,
+    DetectedFieldElement, FieldDetection,
+)
 from .perception_pipeline import PerceptionPipeline
 
 __all__ = [
@@ -53,6 +57,9 @@ __all__ = [
     "OpponentTracker", "OpponentState",
     # sensor fusion
     "SensorFusion", "FusedObservation", "IMUReading", "OdomReading",
+    # field detector
+    "AbstractFieldDetector", "MockFieldDetector", "CVFieldDetector",
+    "DetectedFieldElement", "FieldDetection",
     # pipeline
     "PerceptionPipeline",
 ]

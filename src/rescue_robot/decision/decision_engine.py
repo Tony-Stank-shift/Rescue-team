@@ -290,10 +290,28 @@ class DecisionEngine:
 
     # ---- FREE_RUN / TIME_PRESSURE ----
 
+    def _check_invalid_transport(self, rx: float, ry: float) -> bool:
+        """检测转运无效恢复：目标被裁判重新放在场地中央"""
+        import math
+        for tid, t in self._world_map.targets.items():
+            from rescue_robot.perception.target_types import TargetStatus
+            if t.status == TargetStatus.ACTIVE:
+                dist_to_center = math.sqrt(
+                    (t.position[0] - 1500)**2 + (t.position[1] - 1500)**2
+                )
+                if dist_to_center < 500:
+                    logger.info("检测到目标在场地中央(无效转运恢复): ID=%d", tid)
+                    return True
+        return False
+
     def _handle_free_run(self, rx: float, ry: float,
                          nav_arrived: bool, grip_done: bool,
                          release_done: bool) -> Action:
         """处理自由转运状态"""
+        # 检测转运无效恢复
+        if self._check_invalid_transport(rx, ry):
+            self._current_target = None  # 重新选择目标
+
         # 选择目标
         if self._current_target is None:
             self._current_target = self._selector.select_best(

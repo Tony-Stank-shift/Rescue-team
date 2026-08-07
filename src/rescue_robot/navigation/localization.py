@@ -287,6 +287,63 @@ class OdometryLocalizer(AbstractLocalizer):
             theta += 2 * math.pi
         return theta
 
+    def check_confidence(self) -> bool:
+        """检查定位置信度，低于阈值触发恢复"""
+        if self._pose.confidence < 0.3:
+            logger.warning("定位置信度低 (%.2f)，尝试恢复...", self._pose.confidence)
+            self._pose.confidence = 0.5
+            return False
+        return True
+
     @property
     def odom_distance(self) -> float:
         return self._odom_distance
+
+
+class VisualSLAMLocalizer(OdometryLocalizer):
+    """
+    视觉 SLAM 定位器桩。
+
+    在里程计+IMU基础上融合视觉特征跟踪。
+    实际部署时集成 ORB-SLAM3 / RTAB-Map。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._visual_features = 0
+        self._slam_ready = False
+        logger.info("VisualSLAMLocalizer init (stub)")
+
+    def feed_image(self, frame) -> int:
+        """喂入图像帧进行视觉里程计"""
+        try:
+            import cv2
+            orb = cv2.ORB_create(nfeatures=500)
+            kp = orb.detect(frame, None)
+            self._visual_features = len(kp)
+            self._slam_ready = self._visual_features > 50
+        except Exception:
+            self._visual_features = 0
+        return self._visual_features
+
+    @property
+    def is_slam_ready(self) -> bool:
+        return self._slam_ready
+
+    def update(self, linear_velocity=0.0, angular_velocity=0.0,
+               dt=0.02, imu_gyro_z=None, odom_left=None,
+               odom_right=None, frame=None):
+        if frame is not None:
+            self.feed_image(frame)
+        return super().update(linear_velocity, angular_velocity,
+                              dt, imu_gyro_z, odom_left, odom_right)
+
+    def recover_localization(self) -> bool:
+        """定位丢失恢复：用视觉特征重定位"""
+        if self._slam_ready and self._visual_features > 100:
+            self._pose.confidence = 0.6
+            logger.info("Visual relocalization: features=%d", self._visual_features)
+            return True
+        logger.warning("Visual relocalization failed: insufficient features")
+        return False
+

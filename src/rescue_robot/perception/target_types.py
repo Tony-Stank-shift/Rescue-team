@@ -105,6 +105,7 @@ class Detection:
     confidence: float = 1.0           # 置信度
     contour_area: float = 0.0         # 轮廓面积（像素）
     contour_vertices: int = 0         # 轮廓近似顶点数
+    orientation: float = 0.0          # 朝向 (rad)
 
     @property
     def center_pixel(self) -> Tuple[float, float]:
@@ -122,6 +123,7 @@ class DetectedTarget:
     confidence: float = 1.0
     timestamp: float = 0.0
     pixel_position: Tuple[float, float] = (0, 0)  # 像素坐标
+    orientation: float = 0.0               # 目标朝向 (rad)，0=正对机器人
 
 
 # ============================================================

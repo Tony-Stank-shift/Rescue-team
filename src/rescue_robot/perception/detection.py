@@ -200,6 +200,7 @@ class CVDetector(AbstractDetector):
                 # 形状判定
                 shape = self._classify_shape(contour, area, w, h, vertices)
 
+                orient = self._estimate_orientation(contour)
                 detections.append(Detection(
                     color=color,
                     shape=shape,
@@ -207,6 +208,7 @@ class CVDetector(AbstractDetector):
                     confidence=self._calc_confidence(area, vertices),
                     contour_area=area,
                     contour_vertices=vertices,
+                    orientation=orient,
                 ))
 
         return detections
@@ -263,6 +265,20 @@ class CVDetector(AbstractDetector):
 
         # 否则返回顶点数最匹配的
         return candidates[0][0]
+
+    def _estimate_orientation(self, contour) -> float:
+        """用轮廓 PCA 估算目标朝向 (rad)"""
+        import cv2
+        import numpy as np
+        if len(contour) < 5:
+            return 0.0
+        try:
+            data_pts = contour.reshape(-1, 2).astype(np.float32)
+            mean, eigenvectors = cv2.PCACompute(data_pts, mean=None)
+            angle = __import__("math").atan2(eigenvectors[0][1], eigenvectors[0][0])
+            return angle
+        except Exception:
+            return 0.0
 
     def _calc_confidence(self, area: float, vertices: int) -> float:
         """计算检测置信度（启发式）"""
@@ -365,6 +381,7 @@ class MockDetector(AbstractDetector):
                     confidence=self._rng.uniform(0.85, 0.99),
                     contour_area=w * h * 0.7,
                     contour_vertices=self._rng.randint(4, 12),
+                    orientation=self._rng.uniform(-3.14, 3.14),
                 ))
                 target_id += 1
 
@@ -387,6 +404,7 @@ class MockDetector(AbstractDetector):
                 confidence=det.confidence,
                 contour_area=det.contour_area,
                 contour_vertices=det.contour_vertices,
+                orientation=det.orientation,
             ))
         return result
 
