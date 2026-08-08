@@ -311,6 +311,31 @@ class NavigationPipeline:
                         return True
         return False
 
+    def explore(self, robot_pose=None) -> None:
+        """探索模式：驶向场地随机位置"""
+        import random
+        if robot_pose is None:
+            robot_pose = (self._localizer.pose.x, self._localizer.pose.y)
+        rx, ry = robot_pose[0], robot_pose[1]
+        tx = random.randint(300, 2700)
+        ty = random.randint(300, 2200)
+        self.set_target(tx, ty)
+        logger.info("探索模式: target=(%d, %d)", tx, ty)
+
+    def survival_circle(self, robot_pose=None) -> None:
+        """保命模式：在原地附近做小圈运动"""
+        import math, time
+        if robot_pose is None:
+            robot_pose = (self._localizer.pose.x, self._localizer.pose.y)
+        rx, ry = robot_pose[0], robot_pose[1]
+        radius = 400
+        angle = (time.time() * 0.5) % (2 * math.pi)
+        tx = rx + radius * math.cos(angle)
+        ty = ry + radius * math.sin(angle)
+        tx = max(200, min(2800, tx))
+        ty = max(200, min(2800, ty))
+        self.set_target(tx, ty)
+
     def summary(self) -> str:
         return (
             f"导航管线: state={self._state.name}, "

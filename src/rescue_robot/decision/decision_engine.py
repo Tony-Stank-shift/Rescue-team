@@ -32,6 +32,14 @@ from .target_selector import TargetSelector, StrategyState, ScoredTarget
 from .anomaly_handler import (
     AnomalyHandler, AnomalyType, AnomalyReport, RecoveryAction,
 )
+
+class FallbackLevel:
+    """降级层级"""
+    NORMAL = 0        # 正常工作
+    RETRY = 1         # 重试（换参数）
+    SWITCH_TARGET = 2 # 换目标
+    EXPLORE = 3       # 探索扫描
+    SURVIVAL = 4      # 保命绕圈
 from ..perception.target_types import TargetType, TargetInfo, get_point_value
 from ..perception.world_map import WorldMap, TrackedTarget, TargetStatus
 from ..perception.field_elements import SafeZoneColor, FieldLayout
@@ -116,6 +124,13 @@ class DecisionEngine:
         # 当前目标
         self._current_target: Optional[TrackedTarget] = None
         self._transporting = False
+
+        # 降级系统
+        self._fallback_level = FallbackLevel.NORMAL
+        self._fallback_retries = 0
+        self._max_retries = 3
+        self._last_action_time = time.time()
+        self._explore_waypoints = []
 
         # 统计
         self._trips_completed = 0
@@ -241,7 +256,12 @@ class DecisionEngine:
                 self._world_map, (rx, ry)
             )
             if self._current_target is None:
-                return Action(type=ActionType.WAIT, detail="FIRST_TRIP: 无普通物资可用")
+                self._fallback_level = FallbackLevel.EXPLORE
+                explore_pos = self._get_explore_target(rx, ry)
+                logger.warning("FIRST_TRIP: 无普通物资 → 探索模式")
+                return Action(type=ActionType.NAVIGATE_TO,
+                              target_position=explore_pos,
+                              detail="探索: 搜索普通物资")
 
             logger.info(f"FIRST_TRIP: 选择 {self._current_target.info.description} "
                         f"@ ({self._current_target.position[0]:.0f}, "
@@ -319,7 +339,13 @@ class DecisionEngine:
                 self._strategy_state, self.time_remaining_s,
             )
             if self._current_target is None:
-                return Action(type=ActionType.WAIT, detail="无可用目标")
+                if self._fallback_level < FallbackLevel.EXPLORE:
+                    self._fallback_level = FallbackLevel.EXPLORE
+                explore_pos = self._get_explore_target(rx, ry)
+                logger.warning("FREE_RUN: 无可用目标 → 探索模式")
+                return Action(type=ActionType.NAVIGATE_TO,
+                              target_position=explore_pos,
+                              detail="探索: 扫描新目标")
 
             logger.info(f"目标: {self._current_target.info.description} "
                         f"({self._current_target.info.points}分) "
@@ -391,26 +417,75 @@ class DecisionEngine:
     # ---- 异常处理 ----
 
     def _handle_anomaly(self, report: AnomalyReport) -> Action:
-        """处理异常"""
-        logger.error(f"处理异常: {report.type.name} → {report.recovery_action.name}")
+        """处理异常：不再直接停止，改为降级保活"""
+        logger.error("处理异常: %s → %s", report.type.name, report.recovery_action.name)
 
-        if report.is_fatal:
-            return Action(type=ActionType.EMERGENCY_STOP,
-                          detail=f"致命异常: {report.detail}")
+        if report.type == AnomalyType.NO_ACTION_15S:
+            self._fallback_level = FallbackLevel.SURVIVAL
+            pos = self._get_survival_target(1500, 1500)
+            logger.warning("15s异常 → 保命绕圈")
+            return Action(type=ActionType.NAVIGATE_TO,
+                          target_position=pos,
+                          detail="保命: 绕圈移动")
+
+        if report.recovery_action == RecoveryAction.EMERGENCY_STOP:
+            self._fallback_level = FallbackLevel.SURVIVAL
+            pos = self._get_survival_target(1500, 1500)
+            logger.warning("紧急停止 → 降级为保命绕圈")
+            return Action(type=ActionType.NAVIGATE_TO,
+                          target_position=pos,
+                          detail="保命: 紧急降级")
 
         if report.recovery_action == RecoveryAction.ESCAPE_MANEUVER:
             self._anomaly.start_escape()
+            self._last_action_time = time.time()
             return Action(type=ActionType.WAIT,
-                          detail=f"脱困中: {report.detail}")
+                          detail="脱困中: %s" % report.detail)
 
         if report.recovery_action == RecoveryAction.DEGRADE_SENSORS:
-            logger.warning(f"传感器降级: {report.detail}")
+            self._fallback_level = FallbackLevel.EXPLORE
+            logger.warning("传感器降级 → 探索模式")
             return Action(type=ActionType.WAIT,
-                          detail=f"传感器降级: {report.detail}")
+                          detail="传感器降级: %s" % report.detail)
 
         return Action(type=ActionType.WAIT, detail=str(report))
 
     # ---- 区域位置 ----
+
+    def _check_fallback_needed(self, rx: float, ry: float, action: Action) -> bool:
+        """检查是否需要降级"""
+        if action.type == ActionType.WAIT:
+            idle_time = time.time() - self._last_action_time
+            if idle_time > 10:
+                self._fallback_level = FallbackLevel.EXPLORE
+                logger.warning("10s无动作 → 探索模式")
+                return True
+            if idle_time > 13:
+                self._fallback_level = FallbackLevel.SURVIVAL
+                logger.warning("13s无动作 → 保命模式!")
+                return True
+        else:
+            self._last_action_time = time.time()
+            if self._fallback_level >= FallbackLevel.EXPLORE:
+                self._fallback_level = FallbackLevel.NORMAL
+                logger.info("恢复运动 → 降级解除")
+        return False
+
+    def _get_explore_target(self, rx: float, ry: float) -> tuple:
+        """生成探索目标：场地中央 + 随机偏移"""
+        cx = 1500 + random.randint(-600, 600)
+        cy = 1500 + random.randint(-600, 600)
+        cx = max(200, min(2800, cx))
+        cy = max(200, min(2200, cy))
+        return (cx, cy)
+
+    def _get_survival_target(self, rx: float, ry: float) -> tuple:
+        """保命绕圈：以当前位置为中心的圆形路径点"""
+        radius = 500
+        angle = time.time() % (2 * 3.14159)
+        tx = rx + radius * 3.14159 * 0.001  # 微小移动
+        ty = ry + radius * 0.001
+        return (tx, ty)
 
     def _get_supply_area_position(self) -> Tuple[float, float]:
         """获取本队物资区中心位置"""

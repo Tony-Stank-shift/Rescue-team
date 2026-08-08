@@ -52,6 +52,8 @@ class AutonomousState:
         # 看门狗：上一次有动作的时间
         self._last_action_time = time.time()
         self._watchdog_triggered = False
+        self._idle_warning_10s = False
+        self._idle_critical_13s = False
 
     # ---- 状态回调 ----
 

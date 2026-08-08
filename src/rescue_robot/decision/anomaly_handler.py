@@ -67,7 +67,9 @@ class AnomalyHandler:
     """
 
     # 阈值
-    WATCHDOG_TIMEOUT_S = 15.0        # 无动作超时
+    WATCHDOG_TIMEOUT_S = 15.0        # 无动作超时（触发保活，不淘汰）
+    WATCHDOG_WARN_S = 10.0           # 10s预警（触发探索）
+    WATCHDOG_CRITICAL_S = 13.0       # 13s临界（触发保命）
     STUCK_TIME_S = 5.0               # 卡死判定时间
     STUCK_DISTANCE_MM = 30.0         # 卡死判定距离（此距离内无移动=卡死）
     ACCEL_ANOMALY_THRESHOLD = 30.0   # 加速度异常阈值 (m/s²)
@@ -117,13 +119,26 @@ class AnomalyHandler:
 
         # 1. 15 秒无动作检测
         speed = math.sqrt(vx ** 2 + vy ** 2)
+        idle_s = timestamp - self._last_action_time
         if speed > 10:  # 有动作
             self._last_action_time = timestamp
-        elif timestamp - self._last_action_time > self.WATCHDOG_TIMEOUT_S:
+        elif idle_s > self.WATCHDOG_TIMEOUT_S:
             return self._report(
                 AnomalyType.NO_ACTION_15S,
-                f"无动作 {timestamp - self._last_action_time:.1f}s",
-                RecoveryAction.ROUND_END, True,
+                "无动作 %.1fs → 保命模式" % idle_s,
+                RecoveryAction.EMERGENCY_STOP, False,  # 不再fatal!
+            )
+        elif idle_s > self.WATCHDOG_CRITICAL_S:
+            return self._report(
+                AnomalyType.NO_ACTION_15S,
+                "无动作 %.1fs → 保命预警" % idle_s,
+                RecoveryAction.ESCAPE_MANEUVER, False,
+            )
+        elif idle_s > self.WATCHDOG_WARN_S:
+            return self._report(
+                AnomalyType.NO_ACTION_15S,
+                "无动作 %.1fs → 探索预警" % idle_s,
+                RecoveryAction.ESCAPE_MANEUVER, False,
             )
 
         # 2. 失控检测（IMU 异常）
@@ -259,6 +274,23 @@ class AnomalyHandler:
         return self._anomaly_count.get(anomaly_type, 0)
 
     # ---- 内部 ----
+
+    def get_idle_duration(self) -> float:
+        """获取当前空闲时长"""
+        return time.time() - self._last_action_time
+
+    def keep_moving_fallback(self, robot_pose) -> tuple:
+        """保命动作：根据空闲时长返回移动指令"""
+        idle_s = self.get_idle_duration()
+        rx, ry, rtheta = robot_pose
+        if idle_s > 13:
+            # 紧急：大圈移动
+            angle = time.time() % (2 * 3.14159)
+            return (300.0, 0.5)  # 前进+微转
+        elif idle_s > 10:
+            # 探索：向场地中央
+            return (400.0, (1500 - rx) * 0.001)
+        return (200.0, 0.0)
 
     def _report(self, anomaly_type: AnomalyType, detail: str,
                 recovery: RecoveryAction, fatal: bool) -> AnomalyReport:
