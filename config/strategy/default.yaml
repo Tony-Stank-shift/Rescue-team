@@ -1,0 +1,30 @@
+# ============================================================
+# default.yaml —— 默认均衡策略
+#
+# 优先高分目标，但不忽略近距离低分目标。
+# 适合大多数比赛场景。
+# ============================================================
+
+name: "默认均衡策略"
+description: "平衡距离与分值，优先高分但兼顾近距离低分目标"
+
+strategy_weights:
+  distance_weight: 0.3
+  points_weight: 0.5
+  time_weight: 0.2
+  opponent_factor: 0.5
+
+target_selection:
+  first_trip: "nearest_regular"       # 首次转运: 最近普通物资
+  free_run: "best_score"              # 自由转运: 最高分
+  time_pressure: "high_value_only"    # 时间紧迫: 只选高分 (伤员+核心物资)
+
+fallback:
+  max_retries: 3
+  explore_on_fail: true               # 失败后进入探索模式
+  survival_on_critical: true          # 严重异常时保命绕圈
+
+opponent:
+  yield_threshold: "medium"           # 中等威胁即避让
+  contend_close_targets: true         # 近距离目标争夺
+  abandon_distant_low_value: true     # 放弃远处低分目标

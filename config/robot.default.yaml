@@ -1,0 +1,93 @@
+# ============================================================
+# robot.default.yaml —— 机器人默认参数配置
+#
+# 现场调试时直接修改此文件，保存后热加载生效 (DEBUG 模式)。
+# AUTONOMOUS 模式下热加载自动禁用。
+# ============================================================
+
+robot:
+  # 时序参数 (单位: ms)
+  timing:
+    button_debounce_ms: 50
+    button_long_press_ms: 500
+    led_boot_blink_interval_ms: 500
+    led_auto_blink_interval_ms: 200
+    self_check_timeout_s: 10
+    sensor_check_timeout_ms: 3000
+    motor_check_duration_ms: 500
+    post_start_delay_ms: 1000
+
+  # 硬件阈值
+  thresholds:
+    battery_min_voltage: 11.0
+    battery_max_voltage: 12.6
+    motor_min_current_ma: 50
+    motor_max_current_ma: 5000
+    camera_min_fps: 10
+
+  # 电机参数
+  motors:
+    count: 4
+    pid:
+      kp: 0.8
+      ki: 0.01
+      kd: 0.05
+    pid_angle:
+      kp: 1.5
+      ki: 0.0
+      kd: 0.1
+    max_speed_mm_s: 1000
+    max_angular_speed_rad_s: 3.0
+    wheel_base_mm: 200
+
+  # 策略权重 (影响 DecisionEngine 和 TargetSelector)
+  strategy_weights:
+    distance_weight: 0.3
+    points_weight: 0.5
+    time_weight: 0.2
+    opponent_factor: 0.5
+
+  # 比赛参数
+  match:
+    duration_s: 180
+    time_pressure_s: 30
+    nav_timeout_s: 10
+    grip_timeout_s: 3
+    transport_timeout_s: 15
+
+  # 降级策略
+  fallback:
+    max_retries: 3
+    watchdog_warn_s: 10
+    watchdog_critical_s: 13
+    watchdog_timeout_s: 15
+    stuck_time_s: 5
+    stuck_distance_mm: 30
+
+# 感知参数
+perception:
+  # 目标颜色 → 类型映射 (决赛现场可能变更)
+  target_color_map:
+    regular: "green"
+    core: "black"
+    injured: "orange"
+    dangerous: "light_blue"
+
+  # 检测阈值
+  detection:
+    min_confidence: 0.6
+    association_threshold_mm: 100
+    stale_frames: 3
+    remove_frames: 30
+
+# 通信参数
+communication:
+  websocket_port: 8765
+  heartbeat_interval_s: 0.5
+  reconnect_backoff_max_s: 30
+
+# 日志参数
+logging:
+  max_log_size_mb: 50
+  max_total_size_mb: 500
+  keep_recent_matches: 20

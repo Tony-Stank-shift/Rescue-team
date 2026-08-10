@@ -1,0 +1,57 @@
+# ============================================================
+# field.default.yaml —— 场地默认参数配置
+#
+# 比赛场地 3000×3000mm。决赛现场可能调整区域位置。
+# ============================================================
+
+field:
+  size_mm: [3000, 3000]
+  fence_height_mm: 100
+
+  # 出发区 (4 个角落, 300×300mm)
+  start_zones:
+    red_left:    { x: 0,    y: 0,    width: 300, height: 300 }
+    red_right:   { x: 2700, y: 0,    width: 300, height: 300 }
+    blue_left:   { x: 0,    y: 2700, width: 300, height: 300 }
+    blue_right:  { x: 2700, y: 2700, width: 300, height: 300 }
+
+  # 安全区
+  safe_zones:
+    red:
+      x: 50
+      y: 2550
+      width: 600
+      height: 400
+      supply_area:   { x: 50,  y: 2750, width: 300, height: 200 }
+      injured_area:  { x: 350, y: 2750, width: 300, height: 200 }
+    blue:
+      x: 2350
+      y: 2550
+      width: 600
+      height: 400
+      supply_area:   { x: 2350, y: 2750, width: 300, height: 200 }
+      injured_area:  { x: 2650, y: 2750, width: 300, height: 200 }
+
+  # 禁区
+  forbidden:
+    opponent_safe_zone_margin_mm: 50
+    boundary_margin_mm: 100
+    warning_distance_mm: 150
+
+  # 减速带
+  speed_bumps:
+    count_per_zone: 3
+    width_mm: 30
+    height_mm: 5
+
+  # 对抗参数
+  opponent:
+    contact_warning_s: 7.0
+    contact_force_s: 9.0
+    contact_limit_s: 10.0
+    distance_critical_mm: 350
+    distance_high_mm: 500
+    distance_medium_mm: 1000
+
+  # 本队颜色 (赛前抽签后修改)
+  my_color: "red"

@@ -1,0 +1,30 @@
+# ============================================================
+# conservative.yaml —— 保守稳定策略
+#
+# 优先近距离目标，安全第一，严格规避危险目标。
+# 适合确保完赛、稳定拿分的场景。
+# ============================================================
+
+name: "保守稳定策略"
+description: "安全第一，优先近距离目标，确保完赛率"
+
+strategy_weights:
+  distance_weight: 0.5
+  points_weight: 0.3
+  time_weight: 0.2
+  opponent_factor: 0.8                # 对方接近时大幅降低目标优先级
+
+target_selection:
+  first_trip: "nearest_regular"
+  free_run: "nearest_first"           # 最近优先
+  time_pressure: "continue_normal"    # 不改变策略，稳定优先
+
+fallback:
+  max_retries: 2                      # 低失败容忍度，快速降级
+  explore_on_fail: true
+  survival_on_critical: true
+
+opponent:
+  yield_threshold: "low"              # 低威胁即避让
+  contend_close_targets: false        # 不争夺
+  abandon_distant_low_value: true

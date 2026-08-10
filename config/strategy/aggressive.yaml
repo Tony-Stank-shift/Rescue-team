@@ -1,0 +1,30 @@
+# ============================================================
+# aggressive.yaml —— 激进高分策略
+#
+# 始终追逐最高分目标（伤员 15 分），适合需要反超比分的场景。
+# 高风险高回报。
+# ============================================================
+
+name: "激进高分策略"
+description: "始终追逐最高分目标，适合需要反超时使用"
+
+strategy_weights:
+  distance_weight: 0.1
+  points_weight: 0.8
+  time_weight: 0.1
+  opponent_factor: 0.3                # 更愿意与对手争夺
+
+target_selection:
+  first_trip: "nearest_regular"
+  free_run: "highest_points_first"    # 始终最高分
+  time_pressure: "injured_only"       # 只要伤员 (15分)
+
+fallback:
+  max_retries: 5                      # 高失败容忍度
+  explore_on_fail: false              # 不探索，继续尝试高分目标
+  survival_on_critical: true
+
+opponent:
+  yield_threshold: "high"             # 只在高度威胁时避让
+  contend_close_targets: true
+  abandon_distant_low_value: true
