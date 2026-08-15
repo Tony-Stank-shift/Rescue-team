@@ -76,10 +76,10 @@ class LoadManager:
 
     使用方式：
       mgr = LoadManager()
-      # 夹取前检查
+      # 套取前检查
       ok, violation = mgr.can_load(target_info)
       if ok:
-          gripper.close()
+          sleeve.lower()
           mgr.load(target_info, target_id)
       # 投放时
       mgr.release_all()

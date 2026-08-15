@@ -497,10 +497,10 @@ function drawHardware() {
 
   // Connected peripherals with interface labels
   const devices = [
-    {label:'Camera\nUSB 1080P', x:cx-250, y:cy-180, iface:'USB 2.0', color:'#79c0ff', pins:'640×480@30fps\nfx=500 fy=500'},
-    {label:'IMU\nMPU6050', x:cx+250, y:cy-180, iface:'I2C (0x68)', color:'#ffa657', pins:'3轴陀螺+3轴加速\n互补滤波 α=0.95'},
-    {label:'Motor×4\nJGB37-520', x:cx-350, y:cy+30, iface:'GPIO PWM', color:'#f0883e', pins:'12V · 300RPM\n30:1 减速 · 11PPR'},
-    {label:'Servo\nMG996R', x:cx-150, y:cy+190, iface:'GPIO PWM', color:'#f778ba', pins:'推板 0-50mm\n0-90° 10kg·cm'},
+    {label:'Camera\n型号待定', x:cx-250, y:cy-180, iface:'USB 2.0', color:'#79c0ff', pins:'640×480@30fps\n内参待标定'},
+    {label:'IMU\n型号待定', x:cx+250, y:cy-180, iface:'I2C (待定)', color:'#ffa657', pins:'3轴陀螺+3轴加速\n互补滤波 α=0.95'},
+    {label:'Motor×2\n型号待定', x:cx-350, y:cy+30, iface:'GPIO PWM', color:'#f0883e', pins:'3-4A/个 · 10V可跑\n2差速轮+万向轮'},
+    {label:'套取机构\n升降(丝杆)', x:cx-150, y:cy+190, iface:'GPIO PWM', color:'#f778ba', pins:'单自由度\n转轴上下'},
     {label:'Ultrasonic\nHC-SR04', x:cx+150, y:cy+190, iface:'GPIO', color:'#a5d6ff', pins:'TRIG+ECHO\n2cm-400cm'},
     {label:'LED+Btn', x:cx+350, y:cy+30, iface:'GPIO', color:'#d2a8ff', pins:'LED: BCM22,27\nBTN: BCM17'},
     {label:'Battery\n3S LiPo', x:cx, y:cy+100, iface:'Power', color:'#e5534b', pins:'11.1V 5200mAh\nXT60→LM2596→5V'},
@@ -572,8 +572,8 @@ function drawMechanical() {
   const ly = 40+vh+10;
   ctx.font = '9px system-ui';
   [['#4fc3f7','300×300×200mm · 1.5kg · 差分驱动'],
-   ['JGB37-520','4×电机 · 12V · 30:1 · 300RPM · 11PPR'],
-   ['MPU6050','IMU · I2C 0x68'],
+   ['型号待定','2×电机 · 3-4A · 10V可跑'],
+   ['型号待定','IMU · I2C 待定'],
    ['USB Cam','640×480 · 30fps · 俯角30°'],
   ].forEach(([n,desc],i) => {
     ctx.fillStyle = n.startsWith('#') ? n : '#8b949e';

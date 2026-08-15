@@ -137,7 +137,7 @@ class MockHardwareChecker(HardwareChecker):
         return 12.0  # 模拟满电
 
     def get_motor_count(self) -> int:
-        return 4  # 4 个驱动电机
+        return 2  # 2 个驱动电机（差速）
 
 
 # ============================================================

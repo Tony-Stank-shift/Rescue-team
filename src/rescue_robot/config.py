@@ -12,7 +12,7 @@ from enum import IntEnum
 # GPIO 引脚定义（树莓派 BCM 编号，Mock 模式下忽略）
 # ============================================================
 class Pin(IntEnum):
-    """GPIO 引脚分配"""
+    """GPIO 引脚分配（⚠️ 待定，以下为占位值，需等硬件确定）"""
     BUTTON_START = 17       # 一键启动按钮（物理按钮）
     LED_GREEN = 22          # 绿色 LED（状态指示）
     LED_RED = 27            # 红色 LED（错误指示）
@@ -43,8 +43,8 @@ class Thresholds:
     """硬件检查阈值"""
     BATTERY_MIN_VOLTAGE = 11.0      # 最低电池电压（3S 锂电池）
     BATTERY_MAX_VOLTAGE = 12.6      # 最高电池电压
-    MOTOR_MIN_CURRENT_MA = 50       # 电机空载最小电流
-    MOTOR_MAX_CURRENT_MA = 5000     # 电机堵转最大电流
+    MOTOR_MIN_CURRENT_MA = 50       # 电机空载最小电流（待定）
+    MOTOR_MAX_CURRENT_MA = 5000     # 电机堵转最大电流（待定，应高于正常行驶 3-4A）
     CAMERA_MIN_FPS = 10             # 摄像头最低帧率
 
 

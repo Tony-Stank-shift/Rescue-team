@@ -401,14 +401,14 @@ class MotorFaultDetector:
     """
 
     # 检测阈值
-    STALL_CURRENT_MA = 4000       # 堵转电流阈值
+    STALL_CURRENT_MA = 5000       # 堵转电流阈值（待定，应高于正常行驶 3-4A）
     STALL_SPEED_MM_S = 20.0       # 堵转判定速度上限
     IDLE_CURRENT_MA = 100         # 空载判定电流下限
     IDLE_SPEED_MM_S = 100.0       # 空转判定速度指令下限
     OVERHEAT_TEMP_C = 70.0        # 过热温度阈值
     FAULT_COUNT_WARN = 5          # 连续故障告警阈值
 
-    def __init__(self, motor_count: int = 4):
+    def __init__(self, motor_count: int = 2):
         self._motor_count = motor_count
         self._motor_faults: Dict[int, List[MotorFaultReport]] = {
             i: [] for i in range(motor_count)
@@ -762,7 +762,7 @@ if __name__ == "__main__":
         def check_temperature_sensor(self): return True
         def check_motor(self, mid): return True
         def get_camera_fps(self): return 0.0
-        def get_motor_count(self): return 4
+        def get_motor_count(self): return 2
     monitor2 = SensorHealthMonitor(hardware_checker=_FaultyChecker())
     report = monitor2.check_all(force=True)
     print(f"  降级级别: {report.degradation_level.name}")
@@ -778,7 +778,7 @@ if __name__ == "__main__":
         def check_temperature_sensor(self): return True
         def check_motor(self, mid): return True
         def get_camera_fps(self): return 0.0
-        def get_motor_count(self): return 4
+        def get_motor_count(self): return 2
     monitor3 = SensorHealthMonitor(hardware_checker=_DoubleFaultChecker())
     report = monitor3.check_all(force=True)
     print(f"  降级级别: {report.degradation_level.name}")
@@ -797,7 +797,7 @@ if __name__ == "__main__":
     print("  ✅ 正常检测通过")
 
     # 堵转
-    r = detector.check(0, current_ma=4500, speed_mm_s=5, target_speed_mm_s=200)
+    r = detector.check(0, current_ma=5500, speed_mm_s=5, target_speed_mm_s=200)
     print(f"  堵转: {r.status.value} — {r.detail}")
     assert r.status == MotorStatus.STALL, f"应为 STALL，实际为 {r.status.value}"
     print("  ✅ 堵转检测通过")
@@ -817,7 +817,7 @@ if __name__ == "__main__":
 
     # 连续故障
     for _ in range(6):
-        detector.check(0, current_ma=4500, speed_mm_s=5, target_speed_mm_s=200)
+        detector.check(0, current_ma=5500, speed_mm_s=5, target_speed_mm_s=200)
     assert detector.get_consecutive_faults(0) >= 5
     print("  ✅ 连续故障计数通过")
 

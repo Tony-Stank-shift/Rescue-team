@@ -363,12 +363,12 @@ class MotorPIDAngleConfig:
 @dataclass
 class MotorsConfig:
     """电机配置"""
-    count: int = 4
+    count: int = 2
     pid: MotorPIDConfig = field(default_factory=MotorPIDConfig)
     pid_angle: MotorPIDAngleConfig = field(default_factory=MotorPIDAngleConfig)
     max_speed_mm_s: int = 1000
     max_angular_speed_rad_s: float = 3.0
-    wheel_base_mm: int = 200
+    wheel_base_mm: int = 192
 
 
 @dataclass
@@ -625,7 +625,7 @@ robot:
     battery_min_voltage: 11.0
     motor_max_current_ma: 5000
   motors:
-    count: 4
+    count: 2
     max_speed_mm_s: 1000
   strategy_weights:
     distance_weight: 0.3

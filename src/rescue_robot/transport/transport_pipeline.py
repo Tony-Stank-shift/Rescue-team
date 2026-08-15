@@ -1,11 +1,11 @@
 """
 transport_pipeline.py —— 转运主控管线
 
-协调夹爪、装载管理和安全区投放。
+协调套取机构、装载管理和安全区投放。
 
 转运流程（单趟）：
-  导航到目标 → 打开夹爪 → 夹取 → 闭合 →
-  导航到安全区 → 投放 → 释放
+  导航到目标 → 下降套住 → 保持 → 运送 →
+  导航到安全区 → 升起释放
 
 对接 autonomous_state 主循环。
 """
@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional, Set, Tuple
 
-from .gripper import AbstractGripper, MockGripper, GripperAction
+from .sleeve_lift import AbstractSleeveLift, MockSleeveLift, SleeveAction
 from .load_manager import LoadManager, Violation
 from .safe_zone_placer import SafeZonePlacer, PlacementResult, PlacementZone
 from ..perception.target_types import (
@@ -36,7 +36,7 @@ class TransportPhase(Enum):
     """转运阶段"""
     IDLE = auto()               # 空闲
     APPROACHING = auto()        # 接近目标中
-    GRIPPING = auto()           # 夹取中
+    CAPTURING = auto()          # 套取中
     TRANSPORTING = auto()       # 运送至安全区
     PLACING = auto()            # 投放中
     COMPLETE = auto()           # 完成
@@ -48,7 +48,7 @@ class TransportStatus:
     """转运状态"""
     phase: TransportPhase = TransportPhase.IDLE
     trip_number: int = 0
-    gripper_action: GripperAction = GripperAction.OPEN
+    sleeve_action: SleeveAction = SleeveAction.RAISED
     load_count: int = 0
     load_max: int = 3
     target_ids: Set[int] = field(default_factory=set)
@@ -78,11 +78,11 @@ class TransportPipeline:
   """
 
     def __init__(self,
-                 gripper: Optional[AbstractGripper] = None,
+                 sleeve: Optional[AbstractSleeveLift] = None,
                  field_layout: Optional[FieldLayout] = None,
                  my_color: SafeZoneColor = SafeZoneColor.RED,
                  use_mock: bool = True):
-        self._gripper = gripper or MockGripper()
+        self._sleeve = sleeve or MockSleeveLift()
         self._load_mgr = LoadManager()
         self._placer = SafeZonePlacer(
             field_layout or FieldLayout.standard(), my_color
@@ -208,20 +208,20 @@ class TransportPipeline:
             if self._current_targets and nav:
                 target = self._current_targets[0]
                 dist = self._distance(rx, ry, target.position)
-                if dist < 150:  # 到达夹取范围
-                    self._phase = TransportPhase.GRIPPING
+                if dist < 150:  # 到达套取范围
+                    self._phase = TransportPhase.CAPTURING
                     logger.debug(f"到达目标附近: dist={dist:.0f}mm")
                 # 否则导航继续（由 autonomous loop 调用 nav 完成）
 
-        elif self._phase == TransportPhase.GRIPPING:
-            # 夹取
-            if not self._gripper.is_holding():
-                # 打开夹爪
-                self._gripper.open()
+        elif self._phase == TransportPhase.CAPTURING:
+            # 下降套取
+            if not self._sleeve.is_holding():
+                # 升起复位
+                self._sleeve.raise_up()
                 # 构建目标位置
                 positions = {t.id: t.position for t in self._current_targets}
-                # 闭合夹爪
-                success = self._gripper.close_with_retry(positions, max_retries=3)
+                # 下降套住
+                success = self._sleeve.lower_with_retry(positions, max_retries=3)
                 if success:
                     for t in self._current_targets:
                         ok, v = self._load_mgr.load(t.info, t.id)
@@ -229,12 +229,12 @@ class TransportPipeline:
                             self._phase = TransportPhase.VIOLATION
                             return self._get_status()
                     self._phase = TransportPhase.TRANSPORTING
-                    logger.info("夹取完成，开始运送")
+                    logger.info("套取完成，开始运送")
                 else:
-                    logger.error("夹取失败: 放弃本趟转运")
+                    logger.error("套取失败: 放弃本趟转运")
                     self._phase = TransportPhase.IDLE
                     self._current_targets.clear()
-            # 夹爪已闭合时继续
+            # 已套住时继续
 
         elif self._phase == TransportPhase.TRANSPORTING:
             # 运送至安全区
@@ -253,8 +253,8 @@ class TransportPipeline:
             results = self._placer.classify_batch(positions, infos)
             all_valid = all(r.is_valid for r in results)
 
-            # 释放夹爪
-            released = self._gripper.release()
+            # 升起释放
+            released = self._sleeve.raise_up()
 
             if released:
                 # 投放完成
@@ -292,7 +292,7 @@ class TransportPipeline:
         return TransportStatus(
             phase=self._phase,
             trip_number=state.trip_number,
-            gripper_action=self._gripper.state.action,
+            sleeve_action=self._sleeve.state.action,
             load_count=state.count,
             target_ids=state.target_ids,
             violation=None,  # not tracked at this level
@@ -302,7 +302,7 @@ class TransportPipeline:
         self._phase = TransportPhase.IDLE
         self._current_targets.clear()
         self._load_mgr.reset()
-        self._gripper.release()
+        self._sleeve.raise_up()
 
     def summary(self) -> str:
         return (
@@ -364,8 +364,8 @@ if __name__ == "__main__":
     assert ok, "首次转运 1 普通物资应该成功"
 
     # 模拟转运流程
-    tp.update((500, 500, 0))  # APPROACHING → GRIPPING
-    tp.update((500, 500, 0))  # GRIPPING → grip
+    tp.update((500, 500, 0))  # APPROACHING → CAPTURING
+    tp.update((500, 500, 0))  # CAPTURING → capture
     tp.update((500, 500, 0))  # TRANSPORTING
     tp.update((500, 500, 0))  # 仍在 TRANSPORTING
     # 模拟到达安全区
@@ -392,7 +392,7 @@ if __name__ == "__main__":
     # 先完成一次转运
     t = TrackedTarget(id=5, info=regular_info, position=(500, 500))
     tp.start_trip([t])
-    tp._gripper.close({5: (500, 500)})
+    tp._sleeve.lower({5: (500, 500)})
     tp._load_mgr.load(regular_info, 5)
     tp._load_mgr.release_all()
     tp._phase = TransportPhase.IDLE

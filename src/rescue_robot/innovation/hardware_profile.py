@@ -37,20 +37,26 @@ except ImportError:
 
 @dataclass
 class MotorParams:
-    """单个电机参数"""
-    model: str = "JGB37-520"             # 电机型号
-    reduction_ratio: float = 30.0        # 减速比
-    encoder_ppr: int = 11                # 编码器线数 (脉冲/转)
-    max_rpm: int = 300                   # 最大转速
-    rated_voltage: float = 12.0          # 额定电压
-    stall_current_ma: int = 5000         # 堵转电流
-    no_load_current_ma: int = 100        # 空载电流
+    """
+    单个电机参数。
+
+    ⚠️ 硬件选型尚未确定：型号 / 减速比 / 编码器线数 / 转速 / 额定电压 / 堵转电流均为占位值。
+    已确认：正常行驶电流 3-4A；电压 10V 也可跑（额定值待定）。
+    """
+    model: str = "TBD"                   # 电机型号（待定）
+    reduction_ratio: float = 30.0        # 减速比（待定）
+    encoder_ppr: int = 11                # 编码器线数（待定）
+    max_rpm: int = 300                   # 最大转速（待定）
+    rated_voltage: float = 12.0          # 额定电压（待定，10V 可跑）
+    running_current_ma: int = 3500       # 正常行驶电流 3-4A（已确认）
+    stall_current_ma: int = 5000         # 堵转电流（待定，应高于正常行驶电流）
+    no_load_current_ma: int = 100        # 空载电流（待定）
 
 
 @dataclass
 class ChassisParams:
     """底盘参数"""
-    wheel_base_mm: float = 200.0         # 轮距
+    wheel_base_mm: float = 192.0         # 轮距（两轮中心线距离）
     wheel_diameter_mm: float = 65.0      # 轮径
     max_linear_speed_mm_s: int = 1000    # 最大线速度
     max_angular_speed_rad_s: float = 3.0 # 最大角速度
@@ -59,8 +65,8 @@ class ChassisParams:
 
 @dataclass
 class IMUParams:
-    """IMU 参数"""
-    model: str = "MPU6050"               # 型号
+    """IMU 参数（型号待定，以下为占位值）"""
+    model: str = "TBD"                   # 型号（待定）
     gyro_bias_x: float = 0.0             # 陀螺仪零偏 X (rad/s)
     gyro_bias_y: float = 0.0
     gyro_bias_z: float = 0.0
@@ -72,8 +78,8 @@ class IMUParams:
 
 @dataclass
 class CameraParams:
-    """摄像头参数"""
-    model: str = "USB_CAM_1080P"         # 型号
+    """摄像头参数（型号待定，以下为占位值）"""
+    model: str = "TBD"                   # 型号（待定）
     width: int = 640                     # 分辨率
     height: int = 480
     fps: int = 30
@@ -121,7 +127,7 @@ class HardwareProfile:
 
     用法:
       profile = HardwareProfile.from_yaml("config/hardware.yaml")
-      print(profile.motors["front_left"].model)
+      print(profile.motors["left"].model)
     """
     version: str = "1.0"
     robot_name: str = "rescue-bot-01"
@@ -132,11 +138,10 @@ class HardwareProfile:
 
     def __post_init__(self):
         if not self.motors:
+            # 差速驱动：左右各一个驱动电机（另有一个万向轮，非驱动）
             self.motors = {
-                "front_left": MotorParams(),
-                "front_right": MotorParams(),
-                "rear_left": MotorParams(),
-                "rear_right": MotorParams(),
+                "left": MotorParams(),
+                "right": MotorParams(),
             }
 
     @classmethod
@@ -341,7 +346,7 @@ class CalibrationRoutine:
         self._last_results["camera"] = result
         return result
 
-    def calibrate_motors(self, motor_id: str = "front_left",
+    def calibrate_motors(self, motor_id: str = "left",
                          duration_s: float = 3.0,
                          speed_mm_s: int = 200) -> dict:
         """
@@ -499,9 +504,9 @@ if __name__ == "__main__":
     # ---- 测试 1: HardwareProfile 默认值 ----
     print("\n--- 测试 1: HardwareProfile 默认值 ---")
     profile = HardwareProfile()
-    assert len(profile.motors) == 4
-    assert profile.motors["front_left"].model == "JGB37-520"
-    assert profile.chassis.wheel_base_mm == 200.0
+    assert len(profile.motors) == 2
+    assert profile.motors["left"].model == "TBD"
+    assert profile.chassis.wheel_base_mm == 192.0
     print(f"  电机数: {len(profile.motors)}, 轮距: {profile.chassis.wheel_base_mm}mm")
     print("  ✅ 通过")
 
@@ -509,7 +514,7 @@ if __name__ == "__main__":
     print("\n--- 测试 2: to_dict / from_dict 往返 ---")
     d = profile.to_dict()
     profile2 = HardwareProfile.from_dict(d)
-    assert profile2.motors["front_left"].model == profile.motors["front_left"].model
+    assert profile2.motors["left"].model == profile.motors["left"].model
     assert profile2.chassis.wheel_base_mm == profile.chassis.wheel_base_mm
     print("  ✅ 通过")
 
@@ -537,8 +542,8 @@ if __name__ == "__main__":
 
     # ---- 测试 5: 电机校准 ----
     print("\n--- 测试 5: 电机校准 ---")
-    result = cal.calibrate_motors("front_left", duration_s=0.1, speed_mm_s=200)
-    assert result["motor"] == "front_left"
+    result = cal.calibrate_motors("left", duration_s=0.1, speed_mm_s=200)
+    assert result["motor"] == "left"
     assert result["ok"] is True or result["ok"] is False
     print(f"  电机: {result['motor']}, 误差: {result['error_pct']}%, ok={result['ok']}")
     print("  ✅ 通过")
@@ -554,9 +559,9 @@ if __name__ == "__main__":
     assert "race_motor" in adapter.list_profiles()
     adapter.switch_to("race_motor")
     assert adapter.active_name == "race_motor"
-    assert adapter.active_profile.motors["front_left"].max_rpm == 800
+    assert adapter.active_profile.motors["left"].max_rpm == 800
     print(f"  当前配置: {adapter.active_name}")
-    print(f"  最大转速: {adapter.active_profile.motors['front_left'].max_rpm} RPM")
+    print(f"  最大转速: {adapter.active_profile.motors['left'].max_rpm} RPM")
     print("  ✅ 通过")
 
     # ---- 测试 7: 摄像头标定 stub ----
