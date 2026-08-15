@@ -25,9 +25,9 @@ robot:
     motor_max_current_ma: 5000
     camera_min_fps: 10
 
-  # 电机参数
+  # 电机参数（三全向轮）
   motors:
-    count: 4
+    count: 3
     pid:
       kp: 0.8
       ki: 0.01
@@ -38,7 +38,9 @@ robot:
       kd: 0.1
     max_speed_mm_s: 1000
     max_angular_speed_rad_s: 3.0
-    wheel_base_mm: 200
+    wheel_diameter_mm: 65
+    wheel_mount_radius_mm: 150
+    wheel_angles_deg: [0.0, 120.0, 240.0]
 
   # 策略权重 (影响 DecisionEngine 和 TargetSelector)
   strategy_weights:

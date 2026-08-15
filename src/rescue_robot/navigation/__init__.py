@@ -21,6 +21,7 @@ from .path_planner import (
 from .motion_control import (
     MotionController, VelocityCommand, PIDController,
 )
+from .omni_kinematics import OmniDriveKinematics
 from .forbidden_zones import (
     ForbiddenZoneManager, ForbiddenZone,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "AbstractLocalizer", "MockLocalizer", "OdometryLocalizer", "RobotPose",
     "CostMap", "AStarPlanner", "LocalPlanner", "PlanResult", "Point",
     "MotionController", "VelocityCommand", "PIDController",
+    "OmniDriveKinematics",
     "ForbiddenZoneManager", "ForbiddenZone",
     "NavigationPipeline", "NavState",
 ]

@@ -137,7 +137,7 @@ def test_integration_hardware_profile():
     assert "motors" in d, f"缺少 motors 字段: {list(d.keys())}"
     assert "chassis" in d, f"缺少 chassis 字段: {list(d.keys())}"
     assert len(d["motors"]) >= 1, f"至少应有 1 个电机: {len(d['motors'])}"
-    assert d["chassis"]["wheel_base_mm"] == 200.0
+    assert d["chassis"]["wheel_mount_radius_mm"] == 150.0
 
     # 验证电机参数完整性
     motor_names = list(d["motors"].keys())
@@ -147,7 +147,7 @@ def test_integration_hardware_profile():
         assert "max_rpm" in m, f"{motor_name} 缺少 max_rpm 字段"
 
     print(f"  Motors: {motor_names}")
-    print(f"  Wheel base: {d['chassis']['wheel_base_mm']}mm")
+    print(f"  Wheel mount radius: {d['chassis']['wheel_mount_radius_mm']}mm")
 
 
 @test("2.4 HotReloader → 监控策略文件 → 修改后触发回调")
@@ -276,7 +276,7 @@ def test_edge_corrupted_hardware():
         # 应该成功（使用默认值填充）
         assert hp.chassis is not None
         assert len(hp.motors) > 0
-        print(f"  空数据 → Motors: {len(hp.motors)}, 轮距: {hp.chassis.wheel_base_mm}mm")
+        print(f"  空数据 → Motors: {len(hp.motors)}, 回转半径: {hp.chassis.wheel_mount_radius_mm}mm")
     except Exception as e:
         # 可能抛出
         print(f"  空数据抛出异常（预期可接受）: {e}")

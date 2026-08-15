@@ -59,6 +59,7 @@ class AbstractLocalizer:
 
     def update(self,
                linear_velocity: float = 0.0,
+               lateral_velocity: float = 0.0,
                angular_velocity: float = 0.0,
                dt: float = 0.02) -> RobotPose:
         """更新位姿估计"""
@@ -108,31 +109,26 @@ class MockLocalizer(AbstractLocalizer):
 
     def update(self,
                linear_velocity: float = 0.0,
+               lateral_velocity: float = 0.0,
                angular_velocity: float = 0.0,
                dt: float = 0.02) -> RobotPose:
-        """运动模型更新（差速驱动）"""
-        # 简化运动模型
-        if abs(angular_velocity) < 0.001:
-            # 直线运动
-            ds = linear_velocity * dt
-            self._pose.x += ds * math.cos(self._pose.theta)
-            self._pose.y += ds * math.sin(self._pose.theta)
-        else:
-            # 圆弧运动
-            radius = linear_velocity / angular_velocity
-            dtheta = angular_velocity * dt
-            self._pose.x += radius * (math.sin(self._pose.theta + dtheta) -
-                                      math.sin(self._pose.theta))
-            self._pose.y -= radius * (math.cos(self._pose.theta + dtheta) -
-                                      math.cos(self._pose.theta))
-            self._pose.theta += dtheta
+        """运动模型更新（全向驱动）"""
+        theta = self._pose.theta
 
-        # 归一化角度
-        self._pose.theta = self._normalize_angle(self._pose.theta)
+        # 车体速度 → 世界系位移
+        dx = (linear_velocity * math.cos(theta)
+              - lateral_velocity * math.sin(theta)) * dt
+        dy = (linear_velocity * math.sin(theta)
+              + lateral_velocity * math.cos(theta)) * dt
+        dtheta = angular_velocity * dt
+
+        self._pose.x += dx
+        self._pose.y += dy
+        self._pose.theta = self._normalize_angle(self._pose.theta + dtheta)
         self._pose.timestamp = time.time()
 
-        # 累计里程
-        self._odom_distance += abs(linear_velocity * dt)
+        # 累计里程（平移合速度）
+        self._odom_distance += math.hypot(linear_velocity, lateral_velocity) * dt
 
         return self.pose
 
@@ -208,23 +204,24 @@ class OdometryLocalizer(AbstractLocalizer):
 
     def update(self,
                linear_velocity: float = 0.0,
+               lateral_velocity: float = 0.0,
                angular_velocity: float = 0.0,
                dt: float = 0.02,
                imu_gyro_z: Optional[float] = None,
                odom_left: Optional[float] = None,
                odom_right: Optional[float] = None) -> RobotPose:
         """
-        更新位姿。
+        更新位姿（全向里程计 + IMU 融合）。
 
         Args:
-            linear_velocity: 线速度 (mm/s)
+            linear_velocity: 前向速度 vx (mm/s)
+            lateral_velocity: 侧向速度 vy (mm/s)，左为正
             angular_velocity: 角速度 (rad/s)
             dt: 时间步长 (s)
             imu_gyro_z: IMU 陀螺仪 Z 轴读数 (rad/s)，None 则使用 angular_velocity
-            odom_left/odom_right: 编码器读数
+            odom_left/odom_right: 编码器读数（兼容保留）
         """
-        # 里程计增量
-        ds = linear_velocity * dt
+        theta = self._pose.theta
 
         # 角度融合：优先 IMU，fallback 里程计
         if imu_gyro_z is not None:
@@ -236,23 +233,19 @@ class OdometryLocalizer(AbstractLocalizer):
         else:
             dtheta = angular_velocity * dt
 
-        # 更新位姿（同 Mock 运动模型）
-        if abs(dtheta) < 0.0001:
-            self._pose.x += ds * math.cos(self._pose.theta)
-            self._pose.y += ds * math.sin(self._pose.theta)
-        else:
-            radius = ds / dtheta if abs(dtheta) > 0 else float('inf')
-            self._pose.x += radius * (math.sin(self._pose.theta + dtheta) -
-                                      math.sin(self._pose.theta))
-            self._pose.y -= radius * (math.cos(self._pose.theta + dtheta) -
-                                      math.cos(self._pose.theta))
-            self._pose.theta += dtheta
-
-        self._pose.theta = self._normalize_angle(self._pose.theta)
+        # 全向运动模型：车体速度 → 世界系位移
+        dx = (linear_velocity * math.cos(theta)
+              - lateral_velocity * math.sin(theta)) * dt
+        dy = (linear_velocity * math.sin(theta)
+              + lateral_velocity * math.cos(theta)) * dt
+        self._pose.x += dx
+        self._pose.y += dy
+        self._pose.theta = self._normalize_angle(theta + dtheta)
         self._pose.timestamp = time.time()
 
         # 累积里程 + 置信度衰减
-        self._odom_distance += abs(ds)
+        ds = math.hypot(linear_velocity, lateral_velocity) * dt
+        self._odom_distance += ds
         error = self._odom_distance * self.ODOM_ERROR_PER_METER
         self._pose.confidence = max(0.1, 1.0 - error / 1000.0)
 
@@ -330,12 +323,12 @@ class VisualSLAMLocalizer(OdometryLocalizer):
     def is_slam_ready(self) -> bool:
         return self._slam_ready
 
-    def update(self, linear_velocity=0.0, angular_velocity=0.0,
-               dt=0.02, imu_gyro_z=None, odom_left=None,
+    def update(self, linear_velocity=0.0, lateral_velocity=0.0,
+               angular_velocity=0.0, dt=0.02, imu_gyro_z=None, odom_left=None,
                odom_right=None, frame=None):
         if frame is not None:
             self.feed_image(frame)
-        return super().update(linear_velocity, angular_velocity,
+        return super().update(linear_velocity, lateral_velocity, angular_velocity,
                               dt, imu_gyro_z, odom_left, odom_right)
 
     def recover_localization(self) -> bool:

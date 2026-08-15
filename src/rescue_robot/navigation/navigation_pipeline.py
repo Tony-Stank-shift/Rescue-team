@@ -169,7 +169,7 @@ class NavigationPipeline:
 
         if self._motion.is_bump_mode:
             cmd = self._motion.compute_bump_velocity(dt)
-            self._localizer.update(cmd.linear, cmd.angular, dt)
+            self._localizer.update(cmd.linear, cmd.lateral, cmd.angular, dt)
             if self._motion._bump_count >= 3:
                 self._motion.exit_bump_mode()
                 self._state = NavState.MOVING
@@ -227,7 +227,7 @@ class NavigationPipeline:
                     self._current_path, self._cost_map,
                 )
                 cmd = VelocityCommand(
-                    linear=best_vw[0], angular=best_vw[1],
+                    linear=best_vw[0], lateral=0.0, angular=best_vw[1],
                     timestamp=time.time(),
                 )
                 self._state = NavState.AVOIDING
@@ -235,7 +235,7 @@ class NavigationPipeline:
                 self._state = NavState.MOVING
 
             self._total_distance += abs(cmd.linear) * dt
-            self._localizer.update(cmd.linear, cmd.angular, dt)
+            self._localizer.update(cmd.linear, cmd.lateral, cmd.angular, dt)
 
             # 禁区检查
             violation = self._forbidden.check_violation(

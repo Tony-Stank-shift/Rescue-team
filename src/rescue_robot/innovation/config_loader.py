@@ -41,6 +41,7 @@ _ROBOT_SCHEMA = {
     "robot.thresholds.motor_max_current_ma": (int, lambda v: 100 <= v <= 10000),
     "robot.motors.count": (int, lambda v: 1 <= v <= 8),
     "robot.motors.max_speed_mm_s": (int, lambda v: 50 <= v <= 3000),
+    "robot.motors.wheel_mount_radius_mm": (int, lambda v: 50 <= v <= 500),
     "robot.strategy_weights.distance_weight": (float, lambda v: 0.0 <= v <= 1.0),
     "robot.strategy_weights.points_weight": (float, lambda v: 0.0 <= v <= 1.0),
     "robot.strategy_weights.time_weight": (float, lambda v: 0.0 <= v <= 1.0),
@@ -362,13 +363,14 @@ class MotorPIDAngleConfig:
 
 @dataclass
 class MotorsConfig:
-    """电机配置"""
-    count: int = 4
+    """电机配置（三全向轮）"""
+    count: int = 3
     pid: MotorPIDConfig = field(default_factory=MotorPIDConfig)
     pid_angle: MotorPIDAngleConfig = field(default_factory=MotorPIDAngleConfig)
     max_speed_mm_s: int = 1000
     max_angular_speed_rad_s: float = 3.0
-    wheel_base_mm: int = 200
+    wheel_mount_radius_mm: int = 150
+    wheel_angles_deg: List[float] = field(default_factory=lambda: [0.0, 120.0, 240.0])
 
 
 @dataclass
@@ -459,7 +461,10 @@ class RobotConfig:
                 max_speed_mm_s=motors_data.get("max_speed_mm_s", base.motors.max_speed_mm_s),
                 max_angular_speed_rad_s=motors_data.get(
                     "max_angular_speed_rad_s", base.motors.max_angular_speed_rad_s),
-                wheel_base_mm=motors_data.get("wheel_base_mm", base.motors.wheel_base_mm),
+                wheel_mount_radius_mm=motors_data.get(
+                    "wheel_mount_radius_mm", base.motors.wheel_mount_radius_mm),
+                wheel_angles_deg=motors_data.get(
+                    "wheel_angles_deg", base.motors.wheel_angles_deg),
             ),
             strategy_weights=StrategyWeightsConfig(
                 **{**asdict(base.strategy_weights), **sw_data}
@@ -625,8 +630,10 @@ robot:
     battery_min_voltage: 11.0
     motor_max_current_ma: 5000
   motors:
-    count: 4
+    count: 3
     max_speed_mm_s: 1000
+    wheel_mount_radius_mm: 150
+    wheel_angles_deg: [0.0, 120.0, 240.0]
   strategy_weights:
     distance_weight: 0.3
     points_weight: 0.5

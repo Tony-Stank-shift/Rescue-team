@@ -49,9 +49,12 @@ class MotorParams:
 
 @dataclass
 class ChassisParams:
-    """底盘参数"""
-    wheel_base_mm: float = 200.0         # 轮距
+    """底盘参数（三全向轮）"""
     wheel_diameter_mm: float = 65.0      # 轮径
+    wheel_mount_radius_mm: float = 150.0 # 车轮回转半径 L（中心到轮心）
+    wheel_angles_deg: List[float] = field(
+        default_factory=lambda: [0.0, 120.0, 240.0]
+    )                                     # 三全向轮安装角
     max_linear_speed_mm_s: int = 1000    # 最大线速度
     max_angular_speed_rad_s: float = 3.0 # 最大角速度
     max_accel_mm_s2: int = 500           # 最大加速度
@@ -121,7 +124,7 @@ class HardwareProfile:
 
     用法:
       profile = HardwareProfile.from_yaml("config/hardware.yaml")
-      print(profile.motors["front_left"].model)
+      print(profile.motors["wheel_0"].model)
     """
     version: str = "1.0"
     robot_name: str = "rescue-bot-01"
@@ -133,10 +136,9 @@ class HardwareProfile:
     def __post_init__(self):
         if not self.motors:
             self.motors = {
-                "front_left": MotorParams(),
-                "front_right": MotorParams(),
-                "rear_left": MotorParams(),
-                "rear_right": MotorParams(),
+                "wheel_0": MotorParams(),
+                "wheel_1": MotorParams(),
+                "wheel_2": MotorParams(),
             }
 
     @classmethod
@@ -341,7 +343,7 @@ class CalibrationRoutine:
         self._last_results["camera"] = result
         return result
 
-    def calibrate_motors(self, motor_id: str = "front_left",
+    def calibrate_motors(self, motor_id: str = "wheel_0",
                          duration_s: float = 3.0,
                          speed_mm_s: int = 200) -> dict:
         """
@@ -499,18 +501,18 @@ if __name__ == "__main__":
     # ---- 测试 1: HardwareProfile 默认值 ----
     print("\n--- 测试 1: HardwareProfile 默认值 ---")
     profile = HardwareProfile()
-    assert len(profile.motors) == 4
-    assert profile.motors["front_left"].model == "JGB37-520"
-    assert profile.chassis.wheel_base_mm == 200.0
-    print(f"  电机数: {len(profile.motors)}, 轮距: {profile.chassis.wheel_base_mm}mm")
+    assert len(profile.motors) == 3
+    assert profile.motors["wheel_0"].model == "JGB37-520"
+    assert profile.chassis.wheel_mount_radius_mm == 150.0
+    print(f"  电机数: {len(profile.motors)}, 回转半径: {profile.chassis.wheel_mount_radius_mm}mm")
     print("  ✅ 通过")
 
     # ---- 测试 2: HardwareProfile to_dict / from_dict 往返 ----
     print("\n--- 测试 2: to_dict / from_dict 往返 ---")
     d = profile.to_dict()
     profile2 = HardwareProfile.from_dict(d)
-    assert profile2.motors["front_left"].model == profile.motors["front_left"].model
-    assert profile2.chassis.wheel_base_mm == profile.chassis.wheel_base_mm
+    assert profile2.motors["wheel_0"].model == profile.motors["wheel_0"].model
+    assert profile2.chassis.wheel_mount_radius_mm == profile.chassis.wheel_mount_radius_mm
     print("  ✅ 通过")
 
     # ---- 测试 3: 摄像头内参 ----
@@ -537,8 +539,8 @@ if __name__ == "__main__":
 
     # ---- 测试 5: 电机校准 ----
     print("\n--- 测试 5: 电机校准 ---")
-    result = cal.calibrate_motors("front_left", duration_s=0.1, speed_mm_s=200)
-    assert result["motor"] == "front_left"
+    result = cal.calibrate_motors("wheel_0", duration_s=0.1, speed_mm_s=200)
+    assert result["motor"] == "wheel_0"
     assert result["ok"] is True or result["ok"] is False
     print(f"  电机: {result['motor']}, 误差: {result['error_pct']}%, ok={result['ok']}")
     print("  ✅ 通过")
@@ -554,9 +556,9 @@ if __name__ == "__main__":
     assert "race_motor" in adapter.list_profiles()
     adapter.switch_to("race_motor")
     assert adapter.active_name == "race_motor"
-    assert adapter.active_profile.motors["front_left"].max_rpm == 800
+    assert adapter.active_profile.motors["wheel_0"].max_rpm == 800
     print(f"  当前配置: {adapter.active_name}")
-    print(f"  最大转速: {adapter.active_profile.motors['front_left'].max_rpm} RPM")
+    print(f"  最大转速: {adapter.active_profile.motors['wheel_0'].max_rpm} RPM")
     print("  ✅ 通过")
 
     # ---- 测试 7: 摄像头标定 stub ----
