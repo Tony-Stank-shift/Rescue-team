@@ -23,6 +23,7 @@ Action 类型（输出到 autonomous loop）:
 
 import logging
 import math
+import random
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -272,15 +273,14 @@ class DecisionEngine:
                 detail=f"首次转运: 前往普通物资",
             )
 
-        # 导航到目标
-        if not nav_arrived:
-            return Action(
-                type=ActionType.NAVIGATE_TO,
-                target_position=self._current_target.position,
-            )
-
-        # 夹取
+        # 导航到目标（仅未夹取阶段需要到达目标）
         if not grip_done:
+            if not nav_arrived:
+                return Action(
+                    type=ActionType.NAVIGATE_TO,
+                    target_position=self._current_target.position,
+                )
+            # 夹取
             return Action(
                 type=ActionType.GRIP,
                 target_ids=[self._current_target.id],
@@ -356,14 +356,13 @@ class DecisionEngine:
                 target_position=self._current_target.position,
             )
 
-        # 导航 → 夹取 → 运送 → 投放
-        if not nav_arrived:
-            return Action(
-                type=ActionType.NAVIGATE_TO,
-                target_position=self._current_target.position,
-            )
-
+        # 导航 → 夹取（仅未夹取阶段需要到达目标）
         if not grip_done:
+            if not nav_arrived:
+                return Action(
+                    type=ActionType.NAVIGATE_TO,
+                    target_position=self._current_target.position,
+                )
             return Action(
                 type=ActionType.GRIP,
                 target_ids=[self._current_target.id],

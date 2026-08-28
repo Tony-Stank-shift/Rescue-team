@@ -207,7 +207,7 @@ class TransportPipeline:
             # 接近目标
             if self._current_targets and nav:
                 target = self._current_targets[0]
-                dist = self._distance(rx, ry, target.position)
+                dist = self._distance((rx, ry), target.position)
                 if dist < 150:  # 到达套取范围
                     self._phase = TransportPhase.CAPTURING
                     logger.debug(f"到达目标附近: dist={dist:.0f}mm")
@@ -237,13 +237,13 @@ class TransportPipeline:
             # 已套住时继续
 
         elif self._phase == TransportPhase.TRANSPORTING:
-            # 运送至安全区
-            safe_zone = self._placer.get_my_safe_zone_region()
-            if safe_zone:
-                dist_to_safe = self._distance_to_region(rx, ry, safe_zone)
-                if dist_to_safe < 100:  # 到达安全区附近
+            # 运送至投放点（nav 目标已由 DecisionEngine 的 TRANSPORT_TO 设为
+            # 物资区/伤员区中心）：到达投放点附近才投放，避免在安全区边缘提前释放。
+            if nav is not None and nav.target is not None:
+                dist = self._distance((rx, ry), nav.target)
+                if dist < 150:  # 与套取范围的到达容差一致
                     self._phase = TransportPhase.PLACING
-                    logger.debug(f"到达安全区附近: dist={dist_to_safe:.0f}mm")
+                    logger.debug(f"到达投放点: dist={dist:.0f}mm")
 
         elif self._phase == TransportPhase.PLACING:
             # 投放
