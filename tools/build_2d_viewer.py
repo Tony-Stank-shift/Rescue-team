@@ -1,57 +1,85 @@
 #!/usr/bin/env python3
-"""Build self-contained 2D visualization HTML with 4 views."""
+"""Build self-contained 2D visualization HTML from the integrated simulation.
 
-import json, os, sys
+集成仿真可视化：把 rescue_robot 的决策/导航/转运/感知程序接进仿真，
+导出场地俯视图动画（机器人轨迹 + 目标套取/投放 + 状态机流转）。
+"""
+
+import json
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from rescue_robot.simulation.sim_2d import Sim2D, DECISION_TIMESTEP_S
+from rescue_robot.simulation.integrated_sim import IntegratedSim
+from rescue_robot.perception.field_elements import SafeZoneColor
+
+# 目标形状值 → 前端绘制 key（前端只认识这些形状名）
+SHAPE_MAP = {
+    'cube': 'cube',
+    'triangular_pyramid': 'pyramid',
+    'cuboid': 'cuboid',
+    'cylinder': 'cylinder',
+    'cone_frustum': 'cone_frustum',
+    'sphere': 'sphere',
+    'unknown': 'cube',
+}
 
 
-def run_simulation(seed=42, target_count=15, duration_s=6.0):
-    """Run sim and export frame data + final state."""
-    sim = Sim2D(seed=seed)
-    sim.setup_match(target_count=target_count)
+def run_simulation(seed=42, duration_s=180.0, my_color='RED', start_zone=1):
+    """Run integrated sim and export frame data + final state (mm → m)."""
+    color = SafeZoneColor.RED if my_color == 'RED' else SafeZoneColor.BLUE
+    sim = IntegratedSim(seed=seed, my_color=color, start_zone=start_zone)
+    sim.setup_match()
 
-    max_steps = int(duration_s / DECISION_TIMESTEP_S)
+    max_steps = int(min(duration_s, sim.MATCH_DURATION_S) / sim.DT)
     frames = []
-    for step_i in range(max_steps):
-        state = sim.step()
+    step_i = 0
+    while step_i < max_steps and not sim.is_terminal:
+        f = sim.step()
         if step_i % 5 == 0:  # every 100ms
+            x, y, th = f['robot_pose']
             frames.append({
-                'time': state.time_elapsed_s,
-                'score': state.score,
-                'delivered': state.targets_delivered,
-                'rx': state.robot_pose.x,
-                'ry': state.robot_pose.y,
-                'ryaw': state.robot_pose.yaw,
+                'time': f['time_elapsed_s'],
+                'score': f['score'],
+                'delivered': f['targets_delivered'],
+                'total': f['targets_total'],
+                'trip': f['trip_count'],
+                'rx': round(x / 1000.0, 4),
+                'ry': round(y / 1000.0, 4),
+                'ryaw': round(th, 4),
                 'targets': [{
-                    'id': t.id, 'x': round(t.x_m, 4), 'y': round(t.y_m, 4),
-                    'shape': t.shape, 'color': t.color, 'points': t.points,
-                    'delivered': t.is_delivered, 'dangerous': t.is_dangerous
+                    'id': t.world_id,
+                    'x': round(t.x / 1000.0, 4),
+                    'y': round(t.y / 1000.0, 4),
+                    'shape': SHAPE_MAP.get(t.info.shape.value, 'cube'),
+                    'color': t.info.color.value,
+                    'points': t.points,
+                    'delivered': t.delivered,
+                    'dangerous': t.dangerous,
+                    'carried': t.carried,
+                    'valid': t.delivered_valid,
                 } for t in sim.targets],
-                'hw': {
-                    'motor_rpm': [round(r) for r in sim.hw.motor_rpm],
-                    'motor_current_ma': [round(c) for c in sim.hw.motor_current_ma],
-                    'battery_v': round(sim.hw.battery_voltage_v, 2),
-                    'battery_ma': round(sim.hw.battery_current_ma),
-                    'ultrasonic_mm': round(sim.hw.ultrasonic_distance_mm),
-                    'imu_gyro_z': round(sim.hw.imu_gyro_rad_s[2], 4),
-                    'pusher_mm': round(sim.hw.pusher_position_mm, 1),
-                    'latency_ms': round(sim.hw.heartbeat_latency_ms, 1),
-                },
-                'carried_id': sim._carried_target.id if sim._carried_target else None,
-                'trajectory': [list(p) for p in sim.trajectory[-50:]],
-                'events': sim.events[-5:],
+                'carried_id': f['carried_id'],
+                'trajectory': [[round(p[0] / 1000.0, 4), round(p[1] / 1000.0, 4)]
+                               for p in sim.trajectory[-60:]],
+                'events': sim.events[-6:],
+                'action': f['action'],
+                'nav_state': f['nav_state'],
+                'transport_phase': f['transport_phase'],
+                'decision_state': f['decision_state'],
             })
+        step_i += 1
 
-    # Calculate some stats
-    last_state = sim._build_state()
+    delivered = [t for t in sim.targets if t.delivered]
+    valid = [t for t in delivered if t.delivered_valid]
     return {
         'seed': seed,
-        'target_count': target_count,
-        'duration_s': round(duration_s, 1),
-        'final_score': last_state.score,
-        'final_delivered': last_state.targets_delivered,
+        'target_count': len(sim.targets),
+        'duration_s': round(sim._time_elapsed, 1),
+        'final_score': sim.score,
+        'final_delivered': len(delivered),
+        'final_valid': len(valid),
         'frames': frames,
     }
 
@@ -62,7 +90,7 @@ HTML = r'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>救援机器人 - 2D 可视化仿真</title>
+<title>救援机器人 - 集成仿真 2D 可视化</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;font-family:system-ui,'Segoe UI',sans-serif;color:#c9d1d9;display:flex;flex-direction:column;height:100vh;overflow:hidden}
@@ -70,14 +98,14 @@ body{background:#0d1117;font-family:system-ui,'Segoe UI',sans-serif;color:#c9d1d
 .tab{padding:10px 18px;cursor:pointer;border:none;background:none;color:#8b949e;font-size:13px;border-bottom:2px solid transparent;transition:all 0.15s;white-space:nowrap}
 .tab:hover{color:#e6edf3;background:rgba(255,255,255,0.03)}
 .tab.active{color:#58a6ff;border-bottom-color:#58a6ff;font-weight:600}
-.tab-sep{width:1px;height:20px;background:#30363d;margin:0 6px}
 #viewContainer{flex:1;position:relative;overflow:hidden}
 canvas{display:block;position:absolute;top:0;left:0}
-#statusBar{display:flex;gap:24px;align-items:center;padding:6px 16px;background:#161b22;border-top:1px solid #30363d;font-size:11px;color:#8b949e;min-height:32px}
+#statusBar{display:flex;gap:20px;align-items:center;flex-wrap:wrap;padding:6px 16px;background:#161b22;border-top:1px solid #30363d;font-size:11px;color:#8b949e;min-height:32px}
 #statusBar span{display:flex;align-items:center;gap:4px}
 .stat-val{color:#e6edf3;font-weight:600}
-#controlsBar{display:flex;gap:8px;align-items:center;padding:4px 16px;background:#161b22;border-top:1px solid #21262d;min-height:36px;display:none}
-#controlsBar.visible{display:flex}
+.stat-val.warn{color:#f0883e}
+.stat-val.ok{color:#3fb950}
+#controlsBar{display:flex;gap:8px;align-items:center;padding:4px 16px;background:#161b22;border-top:1px solid #21262d;min-height:36px}
 #controlsBar button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px}
 #controlsBar button:hover{background:#30363d}
 #controlsBar button.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
@@ -90,10 +118,6 @@ canvas{display:block;position:absolute;top:0;left:0}
 
 <div id="toolbar">
   <button class="tab active" data-view="scene">比赛场景</button>
-  <span class="tab-sep"></span>
-  <button class="tab" data-view="software">软件架构</button>
-  <button class="tab" data-view="hardware">硬件系统</button>
-  <button class="tab" data-view="mechanical">机械结构</button>
 </div>
 <div id="viewContainer"><canvas id="mainCanvas"></canvas></div>
 <div id="controlsBar">
@@ -109,16 +133,16 @@ canvas{display:block;position:absolute;top:0;left:0}
   <span>时间: <span class="stat-val" id="stTime">0.0s</span></span>
   <span>分数: <span class="stat-val" id="stScore">0</span></span>
   <span>送达: <span class="stat-val" id="stDel">0</span></span>
-  <span>电池: <span class="stat-val" id="stBatt">12.2V</span></span>
-  <span>状态: <span class="stat-val" id="stState">运行中</span></span>
+  <span>趟次: <span class="stat-val" id="stTrip">0</span></span>
+  <span>动作: <span class="stat-val ok" id="stAction">WAIT</span></span>
+  <span>决策: <span class="stat-val" id="stDecision">-</span></span>
+  <span>转运: <span class="stat-val" id="stTransport">-</span></span>
 </div>
 
 <script>
 // ---- EMBEDDED DATA ----
 const SIM_DATA = __DATA_PLACEHOLDER__;
 
-// ---- State ----
-let currentView = 'scene';
 let currentFrameIdx = 0;
 let playing = true;
 let speed = 1;
@@ -140,26 +164,12 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-// ---- Tab switching ----
-document.querySelectorAll('.tab').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    currentView = btn.dataset.view;
-    document.getElementById('controlsBar').classList.toggle('visible', currentView === 'scene');
-    draw();
-  });
-});
-
-// ---- Playback controls ----
 const btnPlay = document.getElementById('btnPlay');
 const btnPrev = document.getElementById('btnPrev');
 const btnNext = document.getElementById('btnNext');
 const btnSpeed = document.getElementById('btnSpeed');
 const speedLabel = document.getElementById('speedLabel');
 const progressBar = document.querySelector('#progress div');
-const controlsBar = document.getElementById('controlsBar');
-controlsBar.classList.add('visible');
 
 function setFrame(idx) {
   currentFrameIdx = Math.max(0, Math.min(SIM_DATA.frames.length - 1, idx));
@@ -171,9 +181,13 @@ function updateStatusBar() {
   if (!f) return;
   document.getElementById('stTime').textContent = f.time.toFixed(1) + 's';
   document.getElementById('stScore').textContent = f.score;
-  document.getElementById('stDel').textContent = f.delivered;
-  document.getElementById('stBatt').textContent = f.hw.battery_v.toFixed(1) + 'V';
-  document.getElementById('stState').textContent = f.carried_id ? '搬运中 #'+f.carried_id : ((currentFrameIdx >= SIM_DATA.frames.length - 1) ? '已结束' : '运行中');
+  document.getElementById('stDel').textContent = f.delivered + '/' + f.total;
+  document.getElementById('stTrip').textContent = f.trip;
+  const actEl = document.getElementById('stAction');
+  actEl.textContent = f.action;
+  actEl.className = 'stat-val ' + (f.action === 'WAIT' ? 'warn' : 'ok');
+  document.getElementById('stDecision').textContent = f.decision_state;
+  document.getElementById('stTransport').textContent = f.transport_phase;
 }
 
 btnPlay.onclick = () => {
@@ -184,7 +198,7 @@ btnPlay.onclick = () => {
 };
 btnPrev.onclick = () => { playing = false; btnPlay.innerHTML = '&#9654; 播放'; btnPlay.classList.remove('active'); setFrame(currentFrameIdx - 1); updateStatusBar(); draw(); };
 btnNext.onclick = () => { playing = false; btnPlay.innerHTML = '&#9654; 播放'; btnPlay.classList.remove('active'); setFrame(currentFrameIdx + 1); updateStatusBar(); draw(); };
-btnSpeed.onclick = () => { const speeds = [0.5, 1, 2, 5, 10]; speed = speeds[(speeds.indexOf(speed) + 1) % speeds.length]; speedLabel.textContent = speed + 'x'; };
+btnSpeed.onclick = () => { const speeds = [0.5, 1, 2, 5, 10, 20]; speed = speeds[(speeds.indexOf(speed) + 1) % speeds.length]; speedLabel.textContent = speed + 'x'; };
 document.addEventListener('keydown', e => {
   if (document.activeElement !== document.body) return;
   if (e.code === 'Space') { e.preventDefault(); btnPlay.click(); }
@@ -192,17 +206,13 @@ document.addEventListener('keydown', e => {
   if (e.code === 'ArrowLeft') { e.preventDefault(); btnPrev.click(); }
 });
 
-// ---- Render loop ----
 function tick(now) {
-  if (playing && currentView === 'scene' && SIM_DATA.frames.length > 1) {
+  if (playing && SIM_DATA.frames.length > 1) {
     if ((now - lastTick) / 1000 >= 0.1 / speed) {
       setFrame((currentFrameIdx + 1) % SIM_DATA.frames.length);
       updateStatusBar();
       lastTick = now;
     }
-  } else if (playing && currentView !== 'scene') {
-    // For static views, still update occasionally
-    if ((now - lastTick) / 1000 >= 0.5) { lastTick = now; }
   }
   draw();
   animId = requestAnimationFrame(tick);
@@ -210,26 +220,9 @@ function tick(now) {
 lastTick = performance.now();
 animId = requestAnimationFrame(tick);
 
-// ============================================================
-//  DRAWING HELPERS
-// ============================================================
+// ---- DRAWING HELPERS ----
 const W = () => canvas.width / (window.devicePixelRatio || 1);
 const H = () => canvas.height / (window.devicePixelRatio || 1);
-
-function r(x) { return Math.round(x); }
-function p2c(mm, scale, ox, oy) { return [ox + mm[0]*scale/1000, oy + mm[1]*scale/1000]; }
-
-function arrowLine(cx, cy, tx, ty, color, width) {
-  ctx.strokeStyle = color; ctx.lineWidth = width || 1.5;
-  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(tx, ty); ctx.stroke();
-  const a = Math.atan2(ty-cy, tx-cx), s = 7;
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.moveTo(tx, ty);
-  ctx.lineTo(tx - s*Math.cos(a-0.5), ty - s*Math.sin(a-0.5));
-  ctx.lineTo(tx - s*Math.cos(a+0.5), ty - s*Math.sin(a+0.5));
-  ctx.fill();
-}
 
 function roundedRect(x, y, w, h, r, fill, stroke) {
   ctx.beginPath(); ctx.moveTo(x+r, y); ctx.lineTo(x+w-r, y);
@@ -241,9 +234,6 @@ function roundedRect(x, y, w, h, r, fill, stroke) {
   if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
 }
 
-// ============================================================
-//  VIEW 1: 比赛场景
-// ============================================================
 function drawScene() {
   const w = W(), h = H();
   ctx.clearRect(0, 0, w, h);
@@ -252,15 +242,12 @@ function drawScene() {
   if (!f) return;
 
   const margin = 30;
-  const fieldPx = Math.min(w - 2*margin, h - 70 - margin);
+  const fieldPx = Math.min(w - 2*margin, h - 90 - margin);
   const ox = (w - fieldPx) / 2;
   const oy = margin + 10;
-  const scale = fieldPx / 3.0; // 3m -> pixels
+  const scale = fieldPx / 3.0; // 3m -> px
 
-  // Background
   ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, w, h);
-
-  // Field grass
   ctx.fillStyle = '#1a3a1a'; roundedRect(ox, oy, 3*scale, 3*scale, 4, '#1a3a1a', null);
 
   // Grid
@@ -270,19 +257,21 @@ function drawScene() {
     ctx.beginPath(); ctx.moveTo(ox+pos, oy); ctx.lineTo(ox+pos, oy+3*scale); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(ox, oy+pos); ctx.lineTo(ox+3*scale, oy+pos); ctx.stroke();
   }
+  ctx.strokeStyle = '#555'; ctx.lineWidth = 3; ctx.strokeRect(ox, oy, 3*scale, 3*scale);
 
-  // Walls (boundary)
-  ctx.strokeStyle = '#555'; ctx.lineWidth = 3;
-  ctx.strokeRect(ox, oy, 3*scale, 3*scale);
-
-  // Safe zones
-  ctx.fillStyle = 'rgba(239,83,80,0.3)'; ctx.fillRect(ox+0.05*scale, oy+2.55*scale, 0.6*scale, 0.4*scale);
-  ctx.fillStyle = 'rgba(66,165,245,0.3)'; ctx.fillRect(ox+2.35*scale, oy+2.55*scale, 0.6*scale, 0.4*scale);
-  ctx.strokeStyle = '#ef5350'; ctx.lineWidth = 1.5; ctx.strokeRect(ox+0.05*scale, oy+2.55*scale, 0.6*scale, 0.4*scale);
-  ctx.strokeStyle = '#42a5f5'; ctx.strokeRect(ox+2.35*scale, oy+2.55*scale, 0.6*scale, 0.4*scale);
-  // Labels
-  ctx.fillStyle = '#ef5350'; ctx.font = '11px system-ui'; ctx.fillText('红队安全区', ox+0.05*scale+4, oy+2.55*scale+16);
-  ctx.fillStyle = '#42a5f5'; ctx.fillText('蓝队安全区', ox+2.35*scale+4, oy+2.55*scale+16);
+  // Safe zones (red left, blue right; field_elements: 100..700 / 2300..2900, y 2200..3000)
+  ctx.fillStyle = 'rgba(239,83,80,0.28)'; ctx.fillRect(ox+0.1*scale, oy+2.2*scale, 0.6*scale, 0.8*scale);
+  ctx.fillStyle = 'rgba(66,165,245,0.28)'; ctx.fillRect(ox+2.3*scale, oy+2.2*scale, 0.6*scale, 0.8*scale);
+  ctx.strokeStyle = '#ef5350'; ctx.lineWidth = 1.5; ctx.strokeRect(ox+0.1*scale, oy+2.2*scale, 0.6*scale, 0.8*scale);
+  ctx.strokeStyle = '#42a5f5'; ctx.strokeRect(ox+2.3*scale, oy+2.2*scale, 0.6*scale, 0.8*scale);
+  // sub-areas (supply / injured)
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
+  ctx.strokeRect(ox+0.1*scale, oy+2.6*scale, 0.3*scale, 0.4*scale);
+  ctx.strokeRect(ox+0.4*scale, oy+2.6*scale, 0.3*scale, 0.4*scale);
+  ctx.strokeRect(ox+2.3*scale, oy+2.6*scale, 0.3*scale, 0.4*scale);
+  ctx.strokeRect(ox+2.6*scale, oy+2.6*scale, 0.3*scale, 0.4*scale);
+  ctx.fillStyle = '#ef5350'; ctx.font = '11px system-ui'; ctx.fillText('红队安全区(物|伤)', ox+0.1*scale+4, oy+2.24*scale);
+  ctx.fillStyle = '#42a5f5'; ctx.fillText('蓝队安全区(物|伤)', ox+2.3*scale+4, oy+2.24*scale);
 
   // Start zones
   ctx.fillStyle = 'rgba(206,147,216,0.3)';
@@ -291,30 +280,26 @@ function drawScene() {
   ctx.strokeStyle = '#ce93d8'; ctx.lineWidth = 1;
   starts.forEach(([sx,sy]) => ctx.strokeRect(ox+sx*scale, oy+sy*scale, 0.3*scale, 0.3*scale));
 
-  // Speed bumps
-  ctx.fillStyle = '#fdd835';
-  starts.forEach(([sx,sy]) => {
-    for (let i = 0; i < 3; i++) {
-      ctx.fillRect(ox+(sx-0.005)*scale, oy+(sy+0.25+i*0.08)*scale, 0.31*scale, 0.005*scale);
-    }
-  });
-
-  // Purple fences
-  ctx.strokeStyle = '#9c27b0'; ctx.lineWidth = 2;
-  [[0.05,2.55],[2.35,2.55]].forEach(([fx,fy]) => {
-    ctx.beginPath(); ctx.moveTo(ox+fx*scale, oy+fy*scale); ctx.lineTo(ox+(fx+0.6)*scale, oy+fy*scale); ctx.stroke();
-  });
-
   // --- TARGETS ---
   const shapeColors = {green:'#4caf50', black:'#616161', orange:'#ff9800', light_blue:'#81d4fa'};
   f.targets.forEach(t => {
-    if (t.delivered || t.id === f.carried_id) return;
+    if (t.delivered) {
+      // 已投放：画在落点，标注正确/错误
+      const tx = ox + t.x * scale, ty = oy + t.y * scale;
+      ctx.strokeStyle = t.valid ? 'rgba(63,185,80,0.8)' : 'rgba(240,67,54,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(tx, ty, 4, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle = t.valid ? '#3fb950' : '#f44336';
+      ctx.font = '8px system-ui';
+      ctx.fillText(t.valid ? '✓' : '✗', tx-2, ty-4);
+      return;
+    }
+    if (t.carried || t.id === f.carried_id) return; // 被携带的跟随机器人
     const tx = ox + t.x * scale, ty = oy + t.y * scale;
     const color = shapeColors[t.color] || '#888';
     ctx.fillStyle = color;
     ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1;
-
-    const s = 6; // size in px
+    const s = 6;
     switch(t.shape) {
       case 'cube': ctx.fillRect(tx-s/2, ty-s/2, s, s); ctx.strokeRect(tx-s/2, ty-s/2, s, s); break;
       case 'pyramid': ctx.beginPath(); ctx.moveTo(tx, ty-s/2); ctx.lineTo(tx+s/2, ty+s/2); ctx.lineTo(tx-s/2, ty+s/2); ctx.closePath(); ctx.fill(); ctx.stroke(); break;
@@ -324,8 +309,6 @@ function drawScene() {
       case 'cone_frustum':
         ctx.beginPath(); ctx.moveTo(tx-s/3, ty-s); ctx.lineTo(tx+s/3, ty-s); ctx.lineTo(tx+s/5, ty+s); ctx.lineTo(tx-s/5, ty+s); ctx.closePath(); ctx.fill(); ctx.stroke(); break;
     }
-
-    // Dangerous label
     if (t.dangerous) {
       ctx.fillStyle = '#f44336'; ctx.font = '7px system-ui'; ctx.fillText('!', tx-1, ty-7);
     }
@@ -343,390 +326,47 @@ function drawScene() {
 
   // --- ROBOT ---
   const rx = ox + f.rx * scale, ry = oy + f.ry * scale, ryaw = f.ryaw;
-  const rw = 0.3 * scale, rh = 0.3 * scale; // 300x300mm
+  const rw = 0.3 * scale, rh = 0.3 * scale;
   ctx.save();
   ctx.translate(rx, ry);
   ctx.rotate(ryaw);
-
-  // Chassis
   ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1.5;
   roundedRect(-rw/2, -rh/2, rw, rh, 3, '#1a1a1a', '#4fc3f7');
-
-  // Carried target
   if (f.carried_id) {
     const ct = f.targets.find(t => t.id === f.carried_id);
     if (ct) {
-      const tc = shapeColors[ct.color] || '#888';
-      ctx.fillStyle = tc;
+      ctx.fillStyle = shapeColors[ct.color] || '#888';
       ctx.fillRect(rw/2-4, -4, 8, 8);
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
-      ctx.strokeRect(rw/2-4, -4, 8, 8);
-      ctx.fillStyle = '#fff'; ctx.font = '6px system-ui'; ctx.fillText('#'+ct.id, rw/2-4, -6);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(rw/2-4, -4, 8, 8);
     }
   }
-
-  // Wheels (4 corners)
-  const whw = 0.012*scale, whh = 0.025*scale;
-  ctx.fillStyle = '#333';
-  [[rw/2-whw, rh/2], [rw/2-whw, -rh/2-whh*2], [-rw/2+whw, rh/2], [-rw/2+whw, -rh/2-whh*2]].forEach(([wx,wy]) => {
-    ctx.fillRect(wx-whw, wy-whh, whw*2, whh*2);
-  });
-
-  // Direction arrow
   ctx.fillStyle = '#4fc3f7';
   ctx.beginPath(); ctx.moveTo(rw/2, 0); ctx.lineTo(rw/2-6, -4); ctx.lineTo(rw/2-6, 4); ctx.closePath(); ctx.fill();
-
   ctx.restore();
 
-  // --- HUD on field ---
+  // --- HUD ---
   ctx.fillStyle = '#fff'; ctx.font = '12px system-ui';
   ctx.fillText(`T=${f.time.toFixed(1)}s`, ox+4, oy+3*scale+14);
   ctx.fillText(`Score: ${f.score}`, ox+4, oy+3*scale+28);
-  ctx.fillText(`Del: ${f.delivered}/${SIM_DATA.target_count}`, ox+4, oy+3*scale+42);
+  ctx.fillText(`Delivered: ${f.delivered}/${f.total}`, ox+4, oy+3*scale+42);
 
-  // Legend
   const lx = ox+3*scale+10, ly = oy;
   ctx.font = '10px system-ui';
-  const items = [['#4fc3f7','机器人'],['#4caf50','普通物资 5分'],['#616161','核心物资 10分'],['#ff9800','伤员 15分'],['#81d4fa','危险品 -10分']];
+  const items = [['#4fc3f7','机器人'],['#4caf50','普通物资 5分'],['#616161','核心物资 10分'],['#ff9800','伤员 15分'],['#81d4fa','危险品 禁止']];
   items.forEach(([c, label], i) => {
     ctx.fillStyle = c; ctx.fillRect(lx, ly+i*16, 8, 8);
     ctx.fillStyle = '#8b949e'; ctx.fillText(label, lx+12, ly+i*16+8);
   });
 
-  // Events
   if (f.events && f.events.length > 0) {
     ctx.fillStyle = '#8b949e'; ctx.font = '9px system-ui';
-    const recent = f.events.slice(-3);
     ctx.fillText('事件:', lx, ly+items.length*16+16);
-    recent.forEach((ev, i) => ctx.fillText(ev, lx, ly+items.length*16+28+i*12));
+    f.events.slice(-5).forEach((ev, i) => ctx.fillText(ev, lx, ly+items.length*16+28+i*12));
   }
 }
 
-// ============================================================
-//  VIEW 2: 软件架构
-// ============================================================
-function drawSoftware() {
-  const w = W(), h = H();
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, w, h);
+function draw() { drawScene(); }
 
-  const cx = w/2, cy = h/2;
-  const modules = [
-    {name:'main.py\n主控', x:cx, y:30, color:'#58a6ff', desc:'入口・状态机・启动'},
-    {name:'perception/', x:cx-250, y:120, color:'#3fb950', desc:'感知: 摄像头・目标检测\n颜色分割・形状分类'},
-    {name:'decision/', x:cx, y:120, color:'#d2a8ff', desc:'决策: 决策引擎・目标选择\n异常处理・策略权重'},
-    {name:'navigation/', x:cx-420, y:260, color:'#f0883e', desc:'导航: A*路径・局部避障\n运动控制・PID'},
-    {name:'transport/', x:cx-160, y:260, color:'#f778ba', desc:'转运: 装载管理・夹爪\n首趟规则・推板控制'},
-    {name:'robustness/', x:cx+160, y:260, color:'#a5d6ff', desc:'健壮性: 故障检测・看门狗\n传感器健康・降级保活'},
-    {name:'innovation/', x:cx+420, y:260, color:'#ffa657', desc:'创新: 硬件配置・热加载\n模型切换・标定'},
-    {name:'comm_server.py', x:cx+250, y:120, color:'#79c0ff', desc:'通信: WebSocket\nJSON协议・调试面板'},
-    {name:'config/', x:cx+460, y:120, color:'#8b949e', desc:'配置: YAML参数\n策略配置・标定数据'},
-    {name:'state_machine.py', x:cx-460, y:120, color:'#e5534b', desc:'状态: BOOT→DEBUG→AUTO\n生命周期管理'},
-  ];
-
-  // Draw modules
-  modules.forEach(m => {
-    roundedRect(m.x-80, m.y-20, 160, 40, 6, m.color+'22', m.color);
-    ctx.fillStyle = m.color; ctx.font = 'bold 11px system-ui';
-    const lines = m.name.split('\n');
-    lines.forEach((line, i) => ctx.fillText(line, m.x-ctx.measureText(line).width/2, m.y-4+i*14));
-    // Description tooltip
-    ctx.fillStyle = '#8b949e'; ctx.font = '8px system-ui';
-    const dlines = m.desc.split('\n');
-    dlines.forEach((line, i) => ctx.fillText(line, m.x-ctx.measureText(line).width/2, m.y+22+i*10));
-  });
-
-  // Dependencies (arrows)
-  const edges = [
-    [0,1],[0,2],[0,3],[0,4],[0,5],[0,6],[0,7],[0,8],[0,9],
-    [1,2],[1,3],[2,3],[2,4],[5,2],[5,3],[7,2],[8,2],[9,0],
-  ];
-  edges.forEach(([a,b]) => {
-    const ma = modules[a], mb = modules[b];
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(ma.x, ma.y+20); ctx.lineTo(mb.x, mb.y-20); ctx.stroke();
-  });
-
-  // State machine flow
-  const smY = 340;
-  const states = ['BOOT', 'DEBUG', 'AUTONOMOUS'];
-  const smX = [cx-200, cx, cx+200];
-  ctx.fillStyle = '#8b949e'; ctx.font = '10px system-ui'; ctx.fillText('状态机流转', cx-30, smY-10);
-  states.forEach((s, i) => {
-    roundedRect(smX[i]-50, smY, 100, 28, 14, s==='AUTONOMOUS'?'#3fb95033':'#8b949e22', s==='AUTONOMOUS'?'#3fb950':'#8b949e');
-    ctx.fillStyle = s==='AUTONOMOUS'?'#3fb950':'#8b949e'; ctx.font = '11px system-ui'; ctx.fillText(s, smX[i]-ctx.measureText(s).width/2, smY+19);
-  });
-  arrowLine(smX[0]+50, smY+14, smX[1]-50, smY+14, '#8b949e', 1);
-  arrowLine(smX[1]+50, smY+14, smX[2]-50, smY+14, '#8b949e', 1);
-
-  // Strategy levels
-  const stY = 390;
-  ctx.fillStyle = '#8b949e'; ctx.font = '10px system-ui'; ctx.fillText('决策策略层级', cx-35, stY-10);
-  ['FIRST_TRIP', 'FREE_RUN', 'TIME_PRESSURE'].forEach((s, i) => {
-    const px = cx-150 + i*150;
-    roundedRect(px-60, stY, 120, 24, 12, '#d2a8ff22', '#d2a8ff');
-    ctx.fillStyle = '#d2a8ff'; ctx.font = '10px system-ui'; ctx.fillText(s, px-ctx.measureText(s).width/2, stY+16);
-    if (i < 2) arrowLine(px+60, stY+12, px+90, stY+12, '#d2a8ff', 1);
-  });
-
-  // Legend
-  ctx.font = '9px system-ui';
-  const ly2 = stY+50;
-  [['#58a6ff','入口'],['#3fb950','感知'],['#d2a8ff','决策'],['#f0883e','导航'],['#f778ba','转运'],['#e5534b','状态'],['#a5d6ff','健壮性']].forEach(([c,n],i) => {
-    const px = 20+i*85;
-    ctx.fillStyle = c; ctx.fillRect(px, ly2, 10, 10);
-    ctx.fillStyle = '#8b949e'; ctx.fillText(n, px+13, ly2+9);
-  });
-}
-
-// ============================================================
-//  VIEW 3: 硬件系统
-// ============================================================
-function drawHardware() {
-  const w = W(), h = H();
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, w, h);
-
-  const cx = w/2, cy = h/2 - 30;
-
-  // Raspberry Pi center
-  roundedRect(cx-50, cy-35, 100, 70, 8, '#1a3a2a', '#3fb950');
-  ctx.fillStyle = '#3fb950'; ctx.font = 'bold 12px system-ui'; ctx.fillText('Raspberry Pi', cx-45, cy-8);
-  ctx.fillText('4B', cx-15, cy+12);
-  ctx.fillStyle = '#8b949e'; ctx.font = '8px system-ui'; ctx.fillText('Linux · Python 3.10+', cx-48, cy+26);
-
-  // Connected peripherals with interface labels
-  const devices = [
-    {label:'Camera\n型号待定', x:cx-250, y:cy-180, iface:'USB 2.0', color:'#79c0ff', pins:'640×480@30fps\n内参待标定'},
-    {label:'IMU\n型号待定', x:cx+250, y:cy-180, iface:'I2C (待定)', color:'#ffa657', pins:'3轴陀螺+3轴加速\n互补滤波 α=0.95'},
-    {label:'Motor×2\n型号待定', x:cx-350, y:cy+30, iface:'GPIO PWM', color:'#f0883e', pins:'3-4A/个 · 10V可跑\n2差速轮+万向轮'},
-    {label:'套取机构\n升降(丝杆)', x:cx-150, y:cy+190, iface:'GPIO PWM', color:'#f778ba', pins:'单自由度\n转轴上下'},
-    {label:'Ultrasonic\nHC-SR04', x:cx+150, y:cy+190, iface:'GPIO', color:'#a5d6ff', pins:'TRIG+ECHO\n2cm-400cm'},
-    {label:'LED+Btn', x:cx+350, y:cy+30, iface:'GPIO', color:'#d2a8ff', pins:'LED: BCM22,27\nBTN: BCM17'},
-    {label:'Battery\n3S LiPo', x:cx, y:cy+100, iface:'Power', color:'#e5534b', pins:'11.1V 5200mAh\nXT60→LM2596→5V'},
-    {label:'WiFi AP', x:cx+300, y:cy-180, iface:'TCP/WS', color:'#3fb950', pins:'WebSocket :8765\nHeartbeat 500ms'},
-  ];
-
-  devices.forEach(d => {
-    // Connection line
-    ctx.strokeStyle = d.color+'55'; ctx.lineWidth = 2;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(d.x, d.y); ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Device box
-    const bw = 120, bh = 45;
-    roundedRect(d.x-bw/2, d.y-bh/2, bw, bh, 6, d.color+'18', d.color);
-    ctx.fillStyle = d.color; ctx.font = 'bold 10px system-ui';
-    const lines = d.label.split('\n');
-    lines.forEach((line, i) => ctx.fillText(line, d.x-ctx.measureText(line).width/2, d.y-bh/2+14+i*14));
-    // Interface badge
-    ctx.fillStyle = d.color+'33'; roundedRect(d.x-ctx.measureText(d.iface).width/2-4, d.y+bh/2-14, ctx.measureText(d.iface).width+8, 16, 3, d.color+'33', null);
-    ctx.fillStyle = d.color; ctx.font = '8px system-ui'; ctx.fillText(d.iface, d.x-ctx.measureText(d.iface).width/2, d.y+bh/2);
-    // Pin info
-    ctx.fillStyle = '#8b949e'; ctx.font = '7px system-ui';
-    const plines = d.pins.split('\n');
-    plines.forEach((l, i) => ctx.fillText(l, d.x+ctx.measureText(d.label.split('\n')[0]).width/2+4, d.y-bh/2+14+i*10));
-  });
-
-  // Legend
-  const ly = cy+250;
-  ctx.font = '9px system-ui';
-  [['#79c0ff','USB'],['#ffa657','I2C'],['#f0883e','GPIO PWM'],['#a5d6ff','GPIO'],['#e5534b','Power'],['#3fb950','WiFi']].forEach(([c,n],i) => {
-    const px = 20+i*100;
-    ctx.fillStyle = c; ctx.fillRect(px, ly, 10, 10);
-    ctx.fillStyle = '#8b949e'; ctx.fillText(n, px+13, ly+9);
-  });
-}
-
-// ============================================================
-//  VIEW 4: 机械结构 (三视图)
-// ============================================================
-function drawMechanical() {
-  const w = W(), h = H();
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#0d1117'; ctx.fillRect(0, 0, w, h);
-
-  const thirdW = w / 3;
-  const vh = h - 60;
-  const midY = 40 + vh/2;
-
-  const views = [
-    {title:'俯视图 (Top)', x:0, draw:drawTopView},
-    {title:'侧视图 (Side)', x:thirdW, draw:drawSideView},
-    {title:'正视图 (Front)', x:thirdW*2, draw:drawFrontView},
-  ];
-
-  views.forEach(v => {
-    ctx.fillStyle = '#8b949e'; ctx.font = '12px system-ui'; ctx.fillText(v.title, v.x+thirdW/2-ctx.measureText(v.title).width/2, 30);
-
-    // Viewport border
-    ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
-    ctx.strokeRect(v.x+10, 40, thirdW-20, vh);
-
-    // Draw the view
-    v.draw(v.x+10, 40, thirdW-20, vh);
-  });
-
-  // Legend below
-  const ly = 40+vh+10;
-  ctx.font = '9px system-ui';
-  [['#4fc3f7','300×300×200mm · 1.5kg · 差分驱动'],
-   ['型号待定','2×电机 · 3-4A · 10V可跑'],
-   ['型号待定','IMU · I2C 待定'],
-   ['USB Cam','640×480 · 30fps · 俯角30°'],
-  ].forEach(([n,desc],i) => {
-    ctx.fillStyle = n.startsWith('#') ? n : '#8b949e';
-    ctx.fillText(n+':', 20, ly+i*16);
-    ctx.fillStyle = '#8b949e'; ctx.fillText(desc, 20+ctx.measureText(n+':').width, ly+i*16);
-  });
-}
-
-function drawTopView(ox, oy, vw, vh) {
-  const cx = ox+vw/2, cy = oy+vh/2;
-  const s = Math.min(vw, vh) / 350 * 300 / 2; // scale: fit 300mm in view
-
-  // Chassis outline
-  ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1.5;
-  roundedRect(cx-s, cy-s, s*2, s*2, 2, '#1a1a1a', '#4fc3f7');
-
-  // Wheels
-  const wr = s * 65/300, wh = s * 6/300;
-  ctx.fillStyle = '#333'; ctx.strokeStyle = '#555'; ctx.lineWidth = 1;
-  [[s*0.9, s*0.85], [s*0.9, -s*0.85], [-s*0.9, s*0.85], [-s*0.9, -s*0.85]].forEach(([wx,wy]) => {
-    ctx.beginPath(); ctx.ellipse(cx+wx, cy+wy, wr, wh, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-  });
-
-  // Motor positions
-  ctx.fillStyle = '#f0883e55'; ctx.strokeStyle = '#f0883e';
-  [[s*0.6, s*0.7], [s*0.6, -s*0.7], [-s*0.6, s*0.7], [-s*0.6, -s*0.7]].forEach(([mx,my]) => {
-    ctx.fillRect(cx+mx-8, cy+my-8, 16, 16);
-    ctx.strokeRect(cx+mx-8, cy+my-8, 16, 16);
-  });
-  ctx.fillStyle = '#f0883e'; ctx.font = '7px system-ui'; ctx.fillText('M', cx+s*0.6-3, cy+s*0.7+4);
-  ctx.fillText('M', cx+s*0.6-3, cy-s*0.7+4);
-  ctx.fillText('M', cx-s*0.6-3, cy+s*0.7+4);
-  ctx.fillText('M', cx-s*0.6-3, cy-s*0.7+4);
-
-  // Pusher plate (front)
-  ctx.fillStyle = '#f778ba44'; ctx.strokeStyle = '#f778ba'; ctx.lineWidth = 1;
-  roundedRect(cx+s-4, cy-s*0.5, s*0.15, s*1.0, 1, '#f778ba44', '#f778ba');
-  ctx.fillStyle = '#f778ba'; ctx.font = '7px system-ui'; ctx.fillText('推板', cx+s-2, cy+s*0.3);
-
-  // IMU
-  ctx.fillStyle = '#ffa657'; ctx.fillRect(cx-4, cy-4, 8, 8);
-  ctx.fillStyle = '#ffa657'; ctx.font = '6px system-ui'; ctx.fillText('IMU', cx-6, cy+14);
-
-  // Camera (front)
-  ctx.fillStyle = '#79c0ff'; ctx.fillRect(cx+s+2, cy-4, 8, 5);
-  ctx.fillStyle = '#79c0ff'; ctx.font = '6px system-ui'; ctx.fillText('CAM', cx+s-4, cy-10);
-
-  // Ultrasonic (front)
-  ctx.fillStyle = '#a5d6ff'; ctx.beginPath(); ctx.arc(cx+s, cy-s*0.2, 3, 0, Math.PI*2); ctx.fill();
-  ctx.fillText('US', cx+s-2, cy-s*0.2-8);
-
-  // Dimensions
-  ctx.strokeStyle = '#8b949e'; ctx.lineWidth = 0.5;
-  // Width arrow
-  const dy = cy+s+15;
-  ctx.beginPath(); ctx.moveTo(cx-s, dy); ctx.lineTo(cx+s, dy); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx-s, dy-4); ctx.lineTo(cx-s, dy+4); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx+s, dy-4); ctx.lineTo(cx+s, dy+4); ctx.stroke();
-  ctx.fillStyle = '#8b949e'; ctx.font = '8px system-ui'; ctx.fillText('300mm', cx-12, dy-6);
-  // Height arrow (vertical)
-  const dx = cx-s-15;
-  ctx.beginPath(); ctx.moveTo(dx, cy-s); ctx.lineTo(dx, cy+s); ctx.stroke();
-  ctx.fillText('300mm', dx-22, cy);
-}
-
-function drawSideView(ox, oy, vw, vh) {
-  const cx = ox+vw/2, cy = oy+vh/2;
-  const sx = vw/300*150, sy = vh/200*100; // scale for 300mm wide x 200mm tall
-
-  // Chassis
-  ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1.5;
-  roundedRect(cx-sx, cy-sy, sx*2, sy*2, 2, '#1a1a1a', '#4fc3f7');
-
-  // Wheel (side view = circle)
-  const wr = sy * 65/200;
-  ctx.fillStyle = '#333'; ctx.strokeStyle = '#555';
-  ctx.beginPath(); ctx.arc(cx-sx*0.7, cy+sy-wr*0.3, wr, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-  ctx.beginPath(); ctx.arc(cx+sx*0.7, cy+sy-wr*0.3, wr, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-
-  // Camera mount (front, angled 30°)
-  const camX = cx+sx, camY = cy-sy*0.3;
-  ctx.fillStyle = '#79c0ff'; ctx.fillRect(camX, camY-3, 10, 6);
-  ctx.fillStyle = '#79c0ff'; ctx.font = '6px system-ui'; ctx.fillText('CAM', camX-10, camY-8);
-  // Angle indicator
-  ctx.strokeStyle = '#79c0ff55'; ctx.lineWidth = 1;
-  ctx.setLineDash([2, 3]);
-  ctx.beginPath(); ctx.moveTo(camX, camY); ctx.lineTo(camX+20, camY+10); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = '#79c0ff'; ctx.font = '7px system-ui'; ctx.fillText('30°', camX+12, camY+1);
-
-  // Pusher
-  ctx.fillStyle = '#f778ba44'; ctx.strokeStyle = '#f778ba';
-  ctx.fillRect(camX-10, cy-sy*0.3, 10, sy*0.6);
-  ctx.strokeRect(camX-10, cy-sy*0.3, 10, sy*0.6);
-  ctx.fillStyle = '#f778ba'; ctx.font = '6px system-ui'; ctx.fillText('推板', camX-10, cy-sy*0.4);
-
-  // Dimensions
-  ctx.strokeStyle = '#8b949e'; ctx.lineWidth = 0.5;
-  // Length
-  const dy2 = cy+sy+15;
-  ctx.beginPath(); ctx.moveTo(cx-sx, dy2); ctx.lineTo(cx+sx, dy2); ctx.stroke();
-  ctx.fillStyle = '#8b949e'; ctx.font = '8px system-ui'; ctx.fillText('300mm', cx-12, dy2-6);
-  // Height
-  const dx2 = cx-sx-15;
-  ctx.beginPath(); ctx.moveTo(dx2, cy-sy); ctx.lineTo(dx2, cy+sy); ctx.stroke();
-  ctx.fillText('200mm', dx2-22, cy);
-  // Wheel diameter
-  ctx.fillText('φ65mm', cx-sx*0.7-15, cy+sy-wr*1.3);
-}
-
-function drawFrontView(ox, oy, vw, vh) {
-  const cx = ox+vw/2, cy = oy+vh/2;
-  const sx = vw/300*150, sy = vh/200*100;
-
-  // Chassis
-  ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1.5;
-  roundedRect(cx-sy, cy-sx, sy*2, sx*2, 2, '#1a1a1a', '#4fc3f7'); // swapped: width=300(height), height=300(width)
-
-  // Wheels (front view = 2 circles at bottom corners)
-  const wr = sy * 65/300;
-  ctx.fillStyle = '#333'; ctx.strokeStyle = '#555';
-  ctx.beginPath(); ctx.arc(cx-sy*0.6, cy+sx-wr*0.3, wr, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-  ctx.beginPath(); ctx.arc(cx+sy*0.6, cy+sx-wr*0.3, wr, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-
-  // Camera (top center)
-  ctx.fillStyle = '#79c0ff'; ctx.fillRect(cx-4, cy-sx-6, 8, 6);
-  ctx.fillText('CAM', cx-8, cy-sx-12);
-
-  // Dimensions
-  ctx.strokeStyle = '#8b949e'; ctx.lineWidth = 0.5;
-  // Width
-  const dy3 = cy+sx+15;
-  ctx.beginPath(); ctx.moveTo(cx-sy, dy3); ctx.lineTo(cx+sy, dy3); ctx.stroke();
-  ctx.fillStyle = '#8b949e'; ctx.font = '8px system-ui'; ctx.fillText('300mm', cx-12, dy3-6);
-  // Height
-  const dx3 = cx-sy-15;
-  ctx.beginPath(); ctx.moveTo(dx3, cy-sx); ctx.lineTo(dx3, cy+sx); ctx.stroke();
-  ctx.fillText('200mm', dx3-22, cy);
-}
-
-// ============================================================
-//  MAIN DRAW DISPATCH
-// ============================================================
-function draw() {
-  switch(currentView) {
-    case 'scene': drawScene(); break;
-    case 'software': drawSoftware(); break;
-    case 'hardware': drawHardware(); break;
-    case 'mechanical': drawMechanical(); break;
-  }
-}
-
-// Initial draw
 setFrame(0);
 updateStatusBar();
 draw();
@@ -736,12 +376,16 @@ draw();
 
 
 def main():
-    out = os.path.expanduser('~/Desktop/sim_2d_viewer.html')
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = os.path.join(here, '..', 'rescue_sim_2d.html')
+    out = os.path.abspath(out)
 
-    print("Running 2D simulation...")
-    data = run_simulation(seed=42, target_count=15, duration_s=30.0)
+    print("Running integrated simulation (decision + navigation + transport)...")
+    data = run_simulation(seed=42, duration_s=180.0)
     print(f"  {len(data['frames'])} frames, {data['target_count']} targets")
-    print(f"  Final: score={data['final_score']}, delivered={data['final_delivered']}")
+    print(f"  Final: score={data['final_score']}, "
+          f"delivered={data['final_delivered']}/{data['target_count']}, "
+          f"valid={data['final_valid']}")
 
     data_json = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
     print(f"  JSON data: {len(data_json):,} chars")
@@ -752,7 +396,7 @@ def main():
 
     print(f"\nDone! Wrote {len(html):,} chars to:")
     print(f"  {out}")
-    print(f"\nDouble-click sim_2d_viewer.html to open.")
+    print(f"\nOpen rescue_sim_2d.html in a browser to view the animation.")
 
 
 if __name__ == '__main__':
