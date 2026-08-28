@@ -62,3 +62,31 @@ class RunMode:
 # ============================================================
 timing = Timing()
 thresholds = Thresholds()
+
+
+# ============================================================
+# 从 YAML 配置覆盖默认值（决赛创新实践环节现场修改，无需重编译）
+# ============================================================
+def apply_robot_config(cfg) -> None:
+    """
+    把 RobotConfig（来自 innovation.config_loader.RobotConfig.from_yaml）
+    应用到全局 timing / thresholds 常量。
+
+    使用 duck typing，避免 config 模块反向依赖 config_loader。
+    """
+    t = cfg.timing
+    Timing.BUTTON_DEBOUNCE_MS = t.button_debounce_ms
+    Timing.BUTTON_LONG_PRESS_MS = t.button_long_press_ms
+    Timing.LED_BOOT_BLINK_INTERVAL_MS = t.led_boot_blink_interval_ms
+    Timing.LED_AUTO_BLINK_INTERVAL_MS = t.led_auto_blink_interval_ms
+    Timing.SELF_CHECK_TIMEOUT_S = t.self_check_timeout_s
+    Timing.SENSOR_CHECK_TIMEOUT_MS = t.sensor_check_timeout_ms
+    Timing.MOTOR_CHECK_DURATION_MS = t.motor_check_duration_ms
+    Timing.POST_START_DELAY_MS = t.post_start_delay_ms
+
+    th = cfg.thresholds
+    Thresholds.BATTERY_MIN_VOLTAGE = th.battery_min_voltage
+    Thresholds.BATTERY_MAX_VOLTAGE = th.battery_max_voltage
+    Thresholds.MOTOR_MIN_CURRENT_MA = th.motor_min_current_ma
+    Thresholds.MOTOR_MAX_CURRENT_MA = th.motor_max_current_ma
+    Thresholds.CAMERA_MIN_FPS = th.camera_min_fps

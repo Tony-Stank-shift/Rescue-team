@@ -86,6 +86,7 @@ class NavigationPipeline:
         self._plan_result: Optional[PlanResult] = None
         self._replan_counter = 0
         self._replan_interval = 30  # 每 30 帧（0.6s）重规划一次
+        self._close_range_mm = 150.0  # 接近段：距目标小于此值时直接精确接近
 
         # 统计
         self._total_distance = 0.0
@@ -183,6 +184,22 @@ class NavigationPipeline:
                 radius_mm=350, cost=COST_OPPONENT,
             )
 
+        # 接近段：距目标很近时直接精确接近，跳过 A* 重规划 / 纯追踪 / prune，
+        # 避免这些环节在目标附近的抖动导致"路径空 + 速度归零"卡死。
+        dist_to_target = math.hypot(
+            current_pose[0] - self._target[0],
+            current_pose[1] - self._target[1],
+        )
+        if dist_to_target < self._close_range_mm:
+            if self._motion.is_at_target(self._target, current_pose):
+                self._state = NavState.ARRIVED
+                return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())
+            cmd = self._motion.compute_velocity(self._target, current_pose, dt=dt)
+            self._total_distance += abs(cmd.linear) * dt
+            self._localizer.update(cmd.linear, cmd.angular, dt)
+            self._state = NavState.MOVING
+            return cmd
+
         # 重规划
         need_replan = (
             self._state == NavState.PLANNING or
@@ -216,6 +233,12 @@ class NavigationPipeline:
                     self._state = NavState.ARRIVED
                     logger.debug("到达目标!")
                     return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())
+                # 路径已被 prune 空但尚未到达目标（最后一段精确接近）：
+                # 直接朝目标点做位置控制，避免 track_path(空路径) 返回零速度而卡死。
+                cmd = self._motion.compute_velocity(self._target, current_pose, dt=dt)
+                self._total_distance += abs(cmd.linear) * dt
+                self._localizer.update(cmd.linear, cmd.angular, dt)
+                return cmd
 
             # 纯追踪
             cmd = self._motion.track_path(self._current_path, current_pose, dt=dt)

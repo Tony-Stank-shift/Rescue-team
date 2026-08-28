@@ -422,7 +422,9 @@ class MockDetector(AbstractDetector):
         field_w, field_h = 3000.0, 3000.0
 
         cx, cy = detection.center_pixel
-        x_mm = (cx / img_w) * field_w - field_w / 2.0  # 居中
-        y_mm = field_h - (cy / img_h) * field_h        # 翻转 Y
+        # 相对机器人的坐标：目标在机器人前方一定范围（模拟摄像头视野），
+        # 避免映射到全场导致目标落在禁区/场地外。
+        rel_x = (cx / img_w - 0.5) * 1000.0            # 左右 ±500mm
+        rel_y = 200.0 + (1.0 - cy / img_h) * 800.0     # 前方 200~1000mm
 
-        return (x_mm, y_mm)
+        return (rel_x, rel_y)

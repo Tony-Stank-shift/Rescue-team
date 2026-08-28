@@ -30,6 +30,12 @@ from .states.debug_state import DebugState
 from .states.autonomous_state import AutonomousState
 from .hardware.button import MockButton, GPIOButton
 from .hardware.indicator import MockIndicator, LEDIndicator
+from .perception.field_elements import FieldLayout, SafeZoneColor
+from .perception.perception_pipeline import PerceptionPipeline
+from .navigation.navigation_pipeline import NavigationPipeline
+from .decision.decision_engine import DecisionEngine
+from .transport.transport_pipeline import TransportPipeline
+from .communication.comm_manager import CommManager
 
 
 # ============================================================
@@ -90,6 +96,16 @@ def main():
     run_mode = os.environ.get("RUN_MODE", RunMode.MOCK)
     logger.info(f"运行模式: {run_mode}")
 
+    # 加载配置文件（决赛创新实践环节现场修改 YAML 即可，无需重编译）
+    try:
+        from .innovation.config_loader import RobotConfig
+        from . import config as _config
+        robot_cfg = RobotConfig.from_yaml("config/robot.default.yaml")
+        _config.apply_robot_config(robot_cfg)
+        logger.info("已加载 config/robot.default.yaml")
+    except Exception as e:
+        logger.warning(f"配置文件加载失败，使用默认参数: {e}")
+
     try:
         # 创建硬件实例
         button, indicator, hw_checker = _create_hardware(run_mode)
@@ -100,10 +116,32 @@ def main():
         # 创建系统自检器
         system_checker = SystemChecker(hw_checker)
 
+        # 创建四大管线 + 通信（按运行模式使用 Mock/真实实现）
+        use_mock = (run_mode == RunMode.MOCK)
+        field_layout = FieldLayout.standard()
+        my_color = (SafeZoneColor.RED
+                    if os.environ.get("TEAM_COLOR", "red").lower() == "red"
+                    else SafeZoneColor.BLUE)
+
+        perception = PerceptionPipeline(use_mock=use_mock, my_safe_zone_color=my_color)
+        navigation = NavigationPipeline(field_layout, my_color=my_color, use_mock=use_mock)
+        transport = TransportPipeline(field_layout=field_layout, my_color=my_color, use_mock=use_mock)
+        decision = DecisionEngine(perception.world_map, my_color=my_color)
+        comm_manager = CommManager(state_machine=sm)
+
         # 创建三个状态处理器
         boot_state = BootState(sm, system_checker, indicator)
-        debug_state = DebugState(sm, button, indicator)
-        autonomous_state = AutonomousState(sm, indicator)
+        debug_state = DebugState(sm, button, indicator, comm_server=comm_manager)
+        autonomous_state = AutonomousState(
+            sm, indicator,
+            perception=perception,
+            decision=decision,
+            navigation=navigation,
+            transport=transport,
+            field_layout=field_layout,
+            my_color=my_color,
+            use_mock=use_mock,
+        )
 
         # 注册到状态机
         sm.register_handler(RobotState.BOOT, boot_state)

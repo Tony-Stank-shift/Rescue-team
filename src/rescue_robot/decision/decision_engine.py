@@ -124,6 +124,7 @@ class DecisionEngine:
 
         # 当前目标
         self._current_target: Optional[TrackedTarget] = None
+        self._trip_targets: List[TrackedTarget] = []  # 本趟转运的所有目标（普通+核心可混合 ≤3）
         self._transporting = False
 
         # 降级系统
@@ -332,13 +333,13 @@ class DecisionEngine:
         if self._check_invalid_transport(rx, ry):
             self._current_target = None  # 重新选择目标
 
-        # 选择目标
+        # 选择目标（伤员单独转运；普通+核心可混合 ≤3）
         if self._current_target is None:
-            self._current_target = self._selector.select_best(
-                self._world_map, (rx, ry),
-                self._strategy_state, self.time_remaining_s,
+            self._trip_targets = self._selector.select_targets_for_trip(
+                self._world_map, (rx, ry), max_count=3,
+                include_injured=True, time_remaining_s=self.time_remaining_s,
             )
-            if self._current_target is None:
+            if not self._trip_targets:
                 if self._fallback_level < FallbackLevel.EXPLORE:
                     self._fallback_level = FallbackLevel.EXPLORE
                 explore_pos = self._get_explore_target(rx, ry)
@@ -347,8 +348,9 @@ class DecisionEngine:
                               target_position=explore_pos,
                               detail="探索: 扫描新目标")
 
-            logger.info(f"目标: {self._current_target.info.description} "
-                        f"({self._current_target.info.points}分) "
+            self._current_target = self._trip_targets[0]
+            names = " + ".join(t.info.description for t in self._trip_targets)
+            logger.info(f"目标: {names} (共{len(self._trip_targets)}个) "
                         f"@ dist={math.sqrt((self._current_target.position[0]-rx)**2 + (self._current_target.position[1]-ry)**2):.0f}mm")
 
             return Action(
@@ -365,7 +367,7 @@ class DecisionEngine:
                 )
             return Action(
                 type=ActionType.GRIP,
-                target_ids=[self._current_target.id],
+                target_ids=[t.id for t in self._trip_targets],
             )
 
         # 运送到正确的区域
@@ -380,12 +382,14 @@ class DecisionEngine:
                 target_position=target_zone,
             )
 
-        # 投放完成
-        self._world_map.mark_in_safe_zone(self._current_target.id)
-        self._targets_delivered += 1
-        self._score += get_point_value(self._current_target.info.type)
+        # 投放完成（本趟可能包含多个目标）
+        for t in self._trip_targets:
+            self._world_map.mark_in_safe_zone(t.id)
+            self._targets_delivered += 1
+            self._score += get_point_value(t.info.type)
         self._trips_completed += 1
         self._current_target = None
+        self._trip_targets = []
 
         return Action(type=ActionType.WAIT, detail="投放完成，选择下一目标")
 
