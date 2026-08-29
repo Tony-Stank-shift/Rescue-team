@@ -38,7 +38,7 @@ robot:
       kd: 0.1
     max_speed_mm_s: 1000
     max_angular_speed_rad_s: 3.0
-    wheel_base_mm: 182
+    wheel_base_mm: 209
 
   # 策略权重 (影响 DecisionEngine 和 TargetSelector)
   strategy_weights:

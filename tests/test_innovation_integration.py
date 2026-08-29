@@ -137,7 +137,7 @@ def test_integration_hardware_profile():
     assert "motors" in d, f"缺少 motors 字段: {list(d.keys())}"
     assert "chassis" in d, f"缺少 chassis 字段: {list(d.keys())}"
     assert len(d["motors"]) >= 1, f"至少应有 1 个电机: {len(d['motors'])}"
-    assert d["chassis"]["wheel_base_mm"] == 192.0
+    assert d["chassis"]["wheel_base_mm"] == 209.0
 
     # 验证电机参数完整性
     motor_names = list(d["motors"].keys())

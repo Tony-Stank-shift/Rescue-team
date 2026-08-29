@@ -56,7 +56,7 @@ class MotorParams:
 @dataclass
 class ChassisParams:
     """底盘参数"""
-    wheel_base_mm: float = 192.0         # 轮距（两轮中心线距离）
+    wheel_base_mm: float = 209.0         # 轮距（两轮中心线距离）
     wheel_diameter_mm: float = 65.0      # 轮径
     max_linear_speed_mm_s: int = 1000    # 最大线速度
     max_angular_speed_rad_s: float = 3.0 # 最大角速度
@@ -506,7 +506,7 @@ if __name__ == "__main__":
     profile = HardwareProfile()
     assert len(profile.motors) == 2
     assert profile.motors["left"].model == "TBD"
-    assert profile.chassis.wheel_base_mm == 192.0
+    assert profile.chassis.wheel_base_mm == 209.0
     print(f"  电机数: {len(profile.motors)}, 轮距: {profile.chassis.wheel_base_mm}mm")
     print("  ✅ 通过")
 
