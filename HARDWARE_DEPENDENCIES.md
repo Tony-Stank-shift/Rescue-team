@@ -72,13 +72,28 @@
 
 ---
 
-## 6. 通信方案 ✅（已确定：TTL 串口）
+## 6. 通信方案 ✅（已确定：TTL 串口，上位机↔STM32）
 
-**结论**：TTL 串口（RDK 的 UART）。
+**结论**：
+- 下位机底盘板：**STM32F407VETx（LQFP100）**，串口用 **USART1**（TX=PA9，RX=PA10）。
+- 波特率：**115200**。
+- 上行（上位机→下位机）：`VEL,v_mm_s,w_mrad_s`、`START`。
+- 下行（下位机→上位机）：`ODOM,x_m,y_m,theta_rad,encL,encR,vL,vR`（帧格式待最终确认）。
 
-**对软件的影响**：⚠️ 需改 `communication/comm_server.py`，新增串口传输层（当前是 WebSocket 占位）。
+**对软件的影响**：✅ 已写 `hardware/serial_chassis.py`（串口底盘驱动）+ `hardware/chassis_interface.py`（坐标转换）。
 
-**❓ 还差**：波特率、RDK 的哪个 UART/引脚、调试模式笔记本端怎么接。
+**❓ 还差**：RDK 端的 UART 号/设备文件（`/dev/ttyS0`？）；下行帧格式最终确认。
+
+**调试链路**：电脑(USB) → USB-TTL 模块 → STM32(USART1: PA9=TX, PA10=RX)。
+
+---
+
+## 6b. 下位机底盘引脚（STM32F407，参考）
+
+- 左电机 PWM：PA6（LPWM）；右电机 PWM：PB5（RPWM）
+- 左编码器 A/B：PE9/PE11（LGMRA/LGMRB）；右编码器 A/B：PD12/PD13（RGMRA/RGMRB）
+- 电流/方向采样：PA1/PA2（LAIN1/LAIN2）、PE0/PE1（RAIN1/RAIN2）
+- SWD 调试：PA13/PA14
 
 ---
 
