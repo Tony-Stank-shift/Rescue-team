@@ -120,7 +120,7 @@ class MotionController:
     def __init__(self,
                  max_linear_speed: float = 1000.0,
                  max_angular_speed: float = 3.0,
-                 wheel_base_mm: float = 192.0):
+                 wheel_base_mm: float = 182.0):
         self._max_v = max_linear_speed
         self._max_w = max_angular_speed
         self._wheel_base = wheel_base_mm

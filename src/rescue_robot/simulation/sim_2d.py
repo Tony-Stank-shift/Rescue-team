@@ -89,11 +89,11 @@ DEFAULT_TARGET_SPECS = [
 ROBOT_SIZE_MM = (300, 300)
 ROBOT_MAX_SPEED_MM_S = 1000.0   # 最大线速度 mm/s
 ROBOT_MAX_ANGULAR_RAD_S = 3.0   # 最大角速度 rad/s
-ROBOT_WHEEL_BASE_MM = 200.0     # 轮距 mm
-ROBOT_WHEEL_DIAMETER_MM = 65.0  # 轮径 mm
-MOTOR_MAX_RPM = 300             # 电机最大转速
-MOTOR_REDUCTION = 30.0          # 减速比
-ENCODER_PPR = 11                # 编码器线数
+ROBOT_WHEEL_BASE_MM = 182.0     # 轮距 mm（mg370 两差速）
+ROBOT_WHEEL_DIAMETER_MM = 65.0  # 轮径 mm（驱动轮 φ65）
+MOTOR_MAX_RPM = 300             # 电机最大转速（输出轴，12V 1:34 减速后约 294rpm）
+MOTOR_REDUCTION = 34.0          # 减速比 1:34
+ENCODER_PPR = 11                # 编码器线数（占位，真实值由底盘层负责）
 
 # 物理参数
 DECISION_TIMESTEP_S = 0.02      # 决策步长 (50Hz)

@@ -368,7 +368,7 @@ class MotorsConfig:
     pid_angle: MotorPIDAngleConfig = field(default_factory=MotorPIDAngleConfig)
     max_speed_mm_s: int = 1000
     max_angular_speed_rad_s: float = 3.0
-    wheel_base_mm: int = 192
+    wheel_base_mm: int = 182
 
 
 @dataclass
