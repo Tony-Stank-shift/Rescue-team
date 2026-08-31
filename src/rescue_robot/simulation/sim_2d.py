@@ -91,9 +91,9 @@ ROBOT_MAX_SPEED_MM_S = 1000.0   # 最大线速度 mm/s
 ROBOT_MAX_ANGULAR_RAD_S = 3.0   # 最大角速度 rad/s
 ROBOT_WHEEL_BASE_MM = 209.0     # 轮距 mm（mg370 两差速，中心线）
 ROBOT_WHEEL_DIAMETER_MM = 65.0  # 轮径 mm（驱动轮 φ65）
-MOTOR_MAX_RPM = 300             # 电机最大转速（输出轴，12V 1:34 减速后约 294rpm）
-MOTOR_REDUCTION = 34.0          # 减速比 1:34
-ENCODER_PPR = 11                # 编码器线数（占位，真实值由底盘层负责）
+MOTOR_MAX_RPM = 250             # 车轮轴最大转速（STM32 速度闭环限值）
+MOTOR_REDUCTION = 34.0          # 减速比 1:34（已含在 ENCODER_PPR，当前计算未再使用）
+ENCODER_PPR = 68028             # 编码器每轮计数（已含减速比 + 四倍频）
 
 # 物理参数
 DECISION_TIMESTEP_S = 0.02      # 决策步长 (50Hz)
@@ -408,8 +408,14 @@ class Sim2D:
         half_wb_m = ROBOT_WHEEL_BASE_MM / 2000.0  # m
         v_left = v_linear - v_angular * half_wb_m
         v_right = v_linear + v_angular * half_wb_m
-        rpm_left = (v_left / (2*math.pi*wheel_radius_m)) * 60.0 * MOTOR_REDUCTION
-        rpm_right = (v_right / (2*math.pi*wheel_radius_m)) * 60.0 * MOTOR_REDUCTION
+        rpm_left = (v_left / (2*math.pi*wheel_radius_m)) * 60.0
+        rpm_right = (v_right / (2*math.pi*wheel_radius_m)) * 60.0
+        # 与 STM32 一致：超最大轮速时按相同比例等比限幅（保持转弯曲率）
+        peak = max(rpm_left, rpm_right)
+        if peak > MOTOR_MAX_RPM:
+            scale = MOTOR_MAX_RPM / peak
+            rpm_left *= scale
+            rpm_right *= scale
 
         self.hw.motor_rpm = [
             rpm_left + random.gauss(0, 2),
@@ -436,7 +442,7 @@ class Sim2D:
         )
 
         # 编码器累计
-        pulses_per_mm = (ENCODER_PPR * MOTOR_REDUCTION) / (math.pi * ROBOT_WHEEL_DIAMETER_MM)
+        pulses_per_mm = ENCODER_PPR / (math.pi * ROBOT_WHEEL_DIAMETER_MM)
         self._encoder_accum[0] += int(v_left * 1000 * DECISION_TIMESTEP_S * pulses_per_mm)
         self._encoder_accum[1] += int(v_right * 1000 * DECISION_TIMESTEP_S * pulses_per_mm)
         self._encoder_accum[2] += int(v_left * 1000 * DECISION_TIMESTEP_S * pulses_per_mm)

@@ -72,17 +72,21 @@
 
 ---
 
-## 6. 通信方案 ✅（已确定：TTL 串口，上位机↔STM32）
+## 6. 通信方案 ✅（已确定：TTL 串口，上位机↔STM32，协议 v1）
+
+**协议**：依据 `chassis_serial_protocol.md`（v1）。
 
 **结论**：
 - 下位机底盘板：**STM32F407VETx（LQFP100）**，串口用 **USART1**（TX=PA9，RX=PA10）。
-- 波特率：**115200**。
-- 上行（上位机→下位机）：`VEL,v_mm_s,w_mrad_s`、`START`。
-- 下行（下位机→上位机）：`ODOM,x_m,y_m,theta_rad,encL,encR,vL,vR`（帧格式待最终确认）。
+- 波特率：**115200**，8/无/1/无流控，ASCII，逗号分隔，`\r\n` 结尾。
+- 上行（上位机→下位机）：`PING`(→PONG)、`START`(→ACK,START，清里程计)、`VEL,v_mm_s,w_mrad_s`、`STOP`(→ACK,STOP)、`ESTOP`(→ACK,ESTOP)。
+- 下行（下位机→上位机）：`ODOM,x_m,y_m,theta_rad,encL,encR,vL_m_s,vR_m_s`（**严格 8 字段**）；`EVENT`/`ERR`/`ACK`/`TEL` 只记录不解析。
 
-**对软件的影响**：✅ 已写 `hardware/serial_chassis.py`（串口底盘驱动）+ `hardware/chassis_interface.py`（坐标转换）。
+**编码器/轮速**：编码器每轮 **68028 count/rev**（已含减速比+四倍频）；最大轮速 **250 RPM**（1 RPM = 3.403392 mm/s）。
 
-**❓ 还差**：RDK 端的 UART 号/设备文件（`/dev/ttyS0`？）；下行帧格式最终确认。
+**对软件的影响**：✅ 已写 `hardware/serial_chassis.py`（严格 ODOM 解析 + PING/START/VEL/STOP/ESTOP + `start_match` 启动流程）+ `hardware/chassis_interface.py`（坐标转换）。`sim_2d.py` 编码器/轮速参数已更新为 68028 / 250 RPM。
+
+**❓ 还差**：RDK 端的 UART 号/设备文件（`/dev/ttyS0`？）。
 
 **调试链路**：电脑(USB) → USB-TTL 模块 → STM32(USART1: PA9=TX, PA10=RX)。
 
