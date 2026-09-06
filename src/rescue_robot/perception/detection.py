@@ -93,7 +93,7 @@ class AbstractDetector:
         raise NotImplementedError
 
     def estimate_position(self, detection: Detection,
-                          camera_height_mm: float = 200,
+                          camera_height_mm: float = 210,
                           camera_fov_deg: float = 70,
                           image_size: Tuple[int, int] = (640, 480)) -> Tuple[float, float]:
         """
@@ -288,7 +288,7 @@ class CVDetector(AbstractDetector):
         return (area_score + vertex_score) / 2.0
 
     def estimate_position(self, detection: Detection,
-                          camera_height_mm: float = 200,
+                          camera_height_mm: float = 210,
                           camera_fov_deg: float = 70,
                           image_size: Tuple[int, int] = (640, 480)) -> Tuple[float, float]:
         """
@@ -409,7 +409,7 @@ class MockDetector(AbstractDetector):
         return result
 
     def estimate_position(self, detection: Detection,
-                          camera_height_mm: float = 200,
+                          camera_height_mm: float = 210,
                           camera_fov_deg: float = 70,
                           image_size: Tuple[int, int] = (640, 480)) -> Tuple[float, float]:
         """

@@ -241,3 +241,119 @@ class ScrewSleeveLift(AbstractSleeveLift):
 
     def cleanup(self) -> None:
         self.raise_up()
+
+
+# ============================================================
+# SG90 舵机套取机构 —— 真实硬件（已确认参数）
+# ============================================================
+
+class ServoSleeveLift(AbstractSleeveLift):
+    """
+    SG90 舵机驱动的套取机构（从上往下套住目标）。
+
+    已确认参数：
+      - 舵机：SG90（PWM 控制）
+      - 行程：0°（平行地面，释放）⇄ 90°（垂直地面，套住）
+      - 夹爪臂长：90mm
+
+    状态映射：
+      - RAISED  = 0°（夹爪平行地面，抬起）
+      - LOWERED = 90°（夹爪垂直地面，下压套住）
+      - HOLD    = 90°（套住目标运送中）
+
+    ⚠️ PWM 输出到真实舵机由硬件层实现（pwm_pin 待定），当前记录角度。
+    """
+
+    ANGLE_RAISED_DEG = 0.0    # 平行地面（释放）
+    ANGLE_LOWERED_DEG = 90.0  # 垂直地面（套住）
+    MOVE_TIME_S = 0.4         # 0°↔90° 移动耗时
+
+    def __init__(self, pwm_pin: Optional[int] = None,
+                 arm_length_mm: float = 90.0):
+        self._pwm_pin = pwm_pin          # 待定（主控/STM32 PWM 输出）
+        self._arm_length_mm = arm_length_mm
+        self._angle_deg = self.ANGLE_RAISED_DEG
+        self._target_positions: dict = {}
+
+        self._state = SleeveState(
+            action=SleeveAction.RAISED,
+            stroke_mm=arm_length_mm,
+            timestamp=time.time(),
+        )
+        logger.info(f"ServoSleeveLift(SG90) 初始化: 行程 0~90°, "
+                    f"夹爪 {arm_length_mm}mm, pwm_pin={pwm_pin}")
+
+    @property
+    def state(self) -> SleeveState:
+        return self._state
+
+    @property
+    def angle_deg(self) -> float:
+        return self._angle_deg
+
+    def lower(self, target_positions: Optional[dict] = None) -> bool:
+        """下压到 90° 套住目标。"""
+        if target_positions is not None:
+            self._target_positions = target_positions
+
+        time.sleep(self.MOVE_TIME_S)
+        self._angle_deg = self.ANGLE_LOWERED_DEG
+        self._state.action = SleeveAction.LOWERED
+        self._state.position_mm = self._arm_length_mm
+        self._state.timestamp = time.time()
+
+        captured = set(self._target_positions.keys())
+        if captured:
+            self._state.holding_ids = captured
+            self._state.holding_count = len(captured)
+            self._state.action = SleeveAction.HOLD
+            logger.info(f"舵机下压套住: {len(captured)} 个目标, IDs={captured}")
+            return True
+        else:
+            self._state.holding_ids.clear()
+            self._state.holding_count = 0
+            logger.debug("舵机下压未套住目标")
+            return False
+
+    def lower_with_retry(self, target_positions=None, max_retries=3) -> bool:
+        """带重试的下压套取。"""
+        for attempt in range(1, max_retries + 1):
+            self.raise_up()
+            if self.lower(target_positions):
+                return True
+            logger.warning("套取重试 %d/%d", attempt, max_retries)
+            time.sleep(0.3)
+        logger.error("套取失败（%d 次重试后）", max_retries)
+        return False
+
+    def raise_up(self) -> bool:
+        """抬起到 0°（平行地面），释放目标。"""
+        if self._state.action == SleeveAction.RAISED:
+            return True
+
+        time.sleep(self.MOVE_TIME_S)
+        released = self._state.holding_ids.copy()
+        self._angle_deg = self.ANGLE_RAISED_DEG
+        self._state.action = SleeveAction.RAISED
+        self._state.position_mm = 0.0
+        self._state.holding_ids.clear()
+        self._state.holding_count = 0
+        self._state.timestamp = time.time()
+        logger.info(f"舵机抬起释放: IDs={released}")
+        return True
+
+    def hold(self) -> bool:
+        self._state.action = SleeveAction.HOLD
+        return True
+
+    def is_holding(self) -> bool:
+        return self._state.holding_count > 0
+
+    def set_angle(self, deg: float) -> None:
+        """设置舵机角度（真实 PWM 输出 TODO：写 pwm_pin）。"""
+        self._angle_deg = deg
+        self._state.timestamp = time.time()
+        # TODO: 真实 PWM 输出（RDK/STM32 的 PWM 接口）
+
+    def cleanup(self) -> None:
+        self.raise_up()
