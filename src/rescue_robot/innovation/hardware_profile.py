@@ -58,7 +58,7 @@ class ChassisParams:
     """底盘参数"""
     wheel_base_mm: float = 209.0         # 轮距（两轮中心线距离）
     wheel_diameter_mm: float = 65.0      # 轮径
-    max_linear_speed_mm_s: int = 1000    # 最大线速度
+    max_linear_speed_mm_s: int = 850     # 最大线速度
     max_angular_speed_rad_s: float = 3.0 # 最大角速度
     max_accel_mm_s2: int = 500           # 最大加速度
 

@@ -283,7 +283,7 @@ class LocalPlanner:
     """
 
     def __init__(self,
-                 max_linear_speed: float = 1000.0,   # mm/s
+                 max_linear_speed: float = 850.0,   # mm/s
                  max_angular_speed: float = 3.0,     # rad/s
                  num_samples: int = 50):
         self._max_v = max_linear_speed

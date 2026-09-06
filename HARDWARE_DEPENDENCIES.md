@@ -5,14 +5,23 @@
 
 ---
 
-## 0. 主控平台 ✅（已确定：地平线 RDK）
+## 0. 主控平台 🔶（暂用电脑上位机，RDK 后置）
 
-**结论**：主控用**地平线 RDK**（非树莓派；X3 / X5 具体型号待确认）。
+**结论**：**先不买 RDK**。用**电脑作为上位机**做整机联调（跑 Python 上层 + USB 摄像头 + 串口连 STM32），**联调成功后**再购买 RDK 部署。
+
+**开发/联调链路**：
+```
+电脑(上位机: Python+OpenCV+串口)
+   ├─ USB 摄像头（cv2.VideoCapture(0)）
+   └─ USB-TTL 串口 ── STM32(F407: USART1 PA9/PA10) 底盘
+```
 
 **对软件的影响**：
-- 软件栈 Python + OpenCV，RDK 可运行（地平线支持 Python/OpenCV）。
-- ⚠️ **GPIO 非 RPi.GPIO**：`hardware/button.py` 的 `GPIOButton`、`hardware/indicator.py` 的 `LEDIndicator` 目前用 RPi.GPIO，接真实按钮/LED 时需改为 RDK 的 GPIO 接口（当前无按钮/LED，暂不影响 Mock 运行）。
-- 摄像头：USB（OpenCV 直读）或 MIPI（RDK 硬件 ISP）。已选 USB 方案。
+- 软件栈 Python + OpenCV + pyserial，全部跨平台，**电脑上即可跑完整上位机**。
+- 串口设备：电脑调试 `/dev/ttyUSB0`；部署 RDK 后改 `/dev/ttyS0`（待定）。
+- 摄像头：USB 免驱，电脑 / RDK 通用。
+- ⚠️ 部署 RDK 后需关注的差异：GPIO 接口（用 RDK 驱动，非 RPi.GPIO）、串口设备名、系统依赖（摄像头驱动等）。
+- RDK 型号（X3/X5）等购买时再定。
 
 ---
 

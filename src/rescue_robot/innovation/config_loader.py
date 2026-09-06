@@ -366,7 +366,7 @@ class MotorsConfig:
     count: int = 2
     pid: MotorPIDConfig = field(default_factory=MotorPIDConfig)
     pid_angle: MotorPIDAngleConfig = field(default_factory=MotorPIDAngleConfig)
-    max_speed_mm_s: int = 1000
+    max_speed_mm_s: int = 850
     max_angular_speed_rad_s: float = 3.0
     wheel_base_mm: int = 209
 
@@ -626,7 +626,7 @@ robot:
     motor_max_current_ma: 5000
   motors:
     count: 2
-    max_speed_mm_s: 1000
+    max_speed_mm_s: 850
   strategy_weights:
     distance_weight: 0.3
     points_weight: 0.5

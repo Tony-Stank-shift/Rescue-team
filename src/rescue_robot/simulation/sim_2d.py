@@ -87,7 +87,7 @@ DEFAULT_TARGET_SPECS = [
 
 # 机器人参数
 ROBOT_SIZE_MM = (300, 300)
-ROBOT_MAX_SPEED_MM_S = 1000.0   # 最大线速度 mm/s
+ROBOT_MAX_SPEED_MM_S = 850.0    # 最大线速度 mm/s（对齐下位机 250RPM 限值）
 ROBOT_MAX_ANGULAR_RAD_S = 3.0   # 最大角速度 rad/s
 ROBOT_WHEEL_BASE_MM = 209.0     # 轮距 mm（mg370 两差速，中心线）
 ROBOT_WHEEL_DIAMETER_MM = 65.0  # 轮径 mm（驱动轮 φ65）
