@@ -25,6 +25,7 @@ from ..navigation.navigation_pipeline import NavigationPipeline
 from ..navigation.motion_control import VelocityCommand
 from ..decision.decision_engine import DecisionEngine, Action, ActionType
 from ..transport.transport_pipeline import TransportPipeline
+from ..hardware.serial_chassis import SerialChassis
 
 logger = logging.getLogger("autonomous_state")
 
@@ -56,6 +57,7 @@ class AutonomousState:
                  decision: Optional[DecisionEngine] = None,
                  navigation: Optional[NavigationPipeline] = None,
                  transport: Optional[TransportPipeline] = None,
+                 chassis: Optional[SerialChassis] = None,
                  field_layout: Optional[FieldLayout] = None,
                  my_color: SafeZoneColor = SafeZoneColor.RED,
                  use_mock: bool = True,
@@ -68,14 +70,16 @@ class AutonomousState:
             decision: 决策引擎（None 则内部创建，绑定感知的世界地图）
             navigation: 导航管线（None 则内部创建 Mock）
             transport: 转运管线（None 则内部创建 Mock）
+            chassis: 串口底盘驱动（SerialChassis），真机联调用；None 则用导航定位器 + controller
             field_layout: 场地布局（None 则用标准场地）
             my_color: 本队安全区颜色（抽签确定）
             use_mock: True=内部创建 Mock 定位/检测
-            controller: 底盘执行器（执行 VelocityCommand），真实硬件 TODO
+            controller: 底盘执行器（执行 VelocityCommand），chassis 为空时使用
         """
         self._sm = state_machine
         self._indicator = indicator
         self._controller = controller
+        self._chassis = chassis  # SerialChassis 实例（真机：位姿来源 + 速度下发）
 
         # ── 四大管线（注入或内部创建）──
         self._field = field_layout or FieldLayout.standard()
@@ -107,9 +111,10 @@ class AutonomousState:
         self._explore_triggered = False
         self._survival_triggered = False
         self._last_action: Optional[Action] = None
+        self._pose: tuple = (150.0, 150.0, 1.5707963267948966)  # 上次位姿（串口无数据时保持）
 
         logger.info(f"AutonomousState 初始化: mock={use_mock}, "
-                    f"my_color={my_color.name}")
+                    f"my_color={my_color.name}, chassis={'是' if chassis else '否'}")
 
     # ---- 状态回调 ----
 
@@ -127,6 +132,16 @@ class AutonomousState:
 
         # 比赛开始
         self._decision.start_match()
+
+        # 真机：若配置了串口底盘，先打开并启动（PING→START 确认连接）
+        if self._chassis is not None:
+            if not self._chassis.is_open:
+                self._chassis.open()
+            if self._chassis.is_open:
+                ok = self._chassis.start_match()
+                logger.info(f"底盘连接+启动: {'✅ 成功' if ok else '⚠️ 失败'}")
+            else:
+                logger.warning("串口底盘打开失败，将无法下发速度/读取位姿")
 
         # 延迟启动（让裁判离开场地）
         logger.info(f"等待 {timing.POST_START_DELAY_MS}ms 后开始运行...")
@@ -185,8 +200,15 @@ class AutonomousState:
 
     def _run_once(self, dt: float) -> None:
         """单帧编排：决策 → 执行 → 导航 → 转运 → 联动 → 看门狗。"""
-        pose = self._navigation.pose
-        x, y, theta = pose.x, pose.y, pose.theta
+        # ── 位姿来源：优先串口（下位机里程计），否则用导航定位器 ──
+        if self._chassis is not None:
+            pose_data = self._chassis.read_pose()
+            if pose_data is not None:
+                self._pose = pose_data
+            x, y, theta = self._pose
+        else:
+            pose = self._navigation.pose
+            x, y, theta = pose.x, pose.y, pose.theta
 
         # ── 0. 检测"新一趟"（决策引擎选中了新目标 → 复位本趟进度标志）──
         cur = self._decision._current_target
@@ -232,8 +254,10 @@ class AutonomousState:
         # ── 4. 导航（内部积分定位器位姿）──
         cmd = self._navigation.update((x, y, theta), dt=dt)
 
-        # ── 5. 底盘执行（真实硬件 TODO：把 cmd 下发给电机驱动）──
-        if self._controller is not None:
+        # ── 5. 底盘执行：串口下发（真机）或 controller（占位）──
+        if self._chassis is not None:
+            self._chassis.send_velocity(cmd.linear, cmd.angular)
+        elif self._controller is not None:
             self._controller.execute(cmd)
 
         # ── 6. 转运推进 ──

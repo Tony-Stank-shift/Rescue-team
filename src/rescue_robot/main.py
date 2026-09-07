@@ -129,6 +129,13 @@ def main():
         decision = DecisionEngine(perception.world_map, my_color=my_color)
         comm_manager = CommManager(state_machine=sm)
 
+        # 创建串口底盘驱动（真机联调：电脑 USB-TTL 或 RDK 的 UART）
+        chassis = None
+        if not use_mock:
+            from .hardware.serial_chassis import SerialChassis
+            chassis = SerialChassis(port=os.environ.get("CHASSIS_PORT", "/dev/ttyUSB0"))
+            logger.info(f"已创建串口底盘驱动: {chassis._port} @ {chassis._baudrate}")
+
         # 创建三个状态处理器
         boot_state = BootState(sm, system_checker, indicator)
         debug_state = DebugState(sm, button, indicator, comm_server=comm_manager)
@@ -138,6 +145,7 @@ def main():
             decision=decision,
             navigation=navigation,
             transport=transport,
+            chassis=chassis,
             field_layout=field_layout,
             my_color=my_color,
             use_mock=use_mock,
