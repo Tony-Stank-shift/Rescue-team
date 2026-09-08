@@ -357,3 +357,107 @@ class ServoSleeveLift(AbstractSleeveLift):
 
     def cleanup(self) -> None:
         self.raise_up()
+
+
+# ============================================================
+# 串口舵机套取机构 —— 通过下位机 SERVO 命令控制（协议 v1.1）
+# ============================================================
+
+class SerialServoLift(AbstractSleeveLift):
+    """
+    套取机构通过下位机（STM32）控制：上位机发 SERVO,RAISE/LOWER/HOLD 命令。
+
+    与 SERVO 命令对应的动作：
+      - RAISE → 转到安全抬起位置
+      - LOWER → 转到放下套取位置（套住）
+      - HOLD  → 保持放下位置
+
+    依赖一个具备 send_servo() / wait_for() 方法的 chassis 对象
+    （即 SerialChassis），用 duck typing 避免循环依赖。
+    """
+
+    MOVE_TIME_S = 0.4  # 机械动作耗时（等舵机到位）
+
+    def __init__(self, chassis, arm_length_mm: float = 90.0,
+                 move_time_s: float = 0.4):
+        self._chassis = chassis
+        self._arm_length_mm = arm_length_mm
+        self._move_time_s = move_time_s
+        self._target_positions: dict = {}
+        self._state = SleeveState(
+            action=SleeveAction.RAISED,
+            stroke_mm=arm_length_mm,
+            timestamp=time.time(),
+        )
+        logger.info(f"SerialServoLift 初始化: 夹爪 {arm_length_mm}mm（经串口 SERVO 命令）")
+
+    @property
+    def state(self) -> SleeveState:
+        return self._state
+
+    def lower(self, target_positions: Optional[dict] = None) -> bool:
+        """发 SERVO,LOWER 套住目标（等待 ACK）。"""
+        if target_positions is not None:
+            self._target_positions = target_positions
+
+        if not self._chassis.send_servo("LOWER"):
+            logger.warning("SERVO,LOWER 发送失败")
+            return False
+        self._chassis.wait_for("ACK,SERVO,LOWER", 0.5)
+        time.sleep(self._move_time_s)
+
+        self._state.action = SleeveAction.LOWERED
+        self._state.position_mm = self._arm_length_mm
+
+        captured = set(self._target_positions.keys())
+        if captured:
+            self._state.holding_ids = captured
+            self._state.holding_count = len(captured)
+            self._state.action = SleeveAction.HOLD
+            logger.info(f"SERVO,LOWER 套住: {len(captured)} 个目标")
+            return True
+        else:
+            self._state.holding_ids.clear()
+            self._state.holding_count = 0
+            logger.debug("SERVO,LOWER 未套住目标")
+            return False
+
+    def lower_with_retry(self, target_positions=None, max_retries=3) -> bool:
+        """带重试的 SERVO,LOWER 套取。"""
+        for attempt in range(1, max_retries + 1):
+            self.raise_up()
+            if self.lower(target_positions):
+                return True
+            logger.warning("套取重试 %d/%d", attempt, max_retries)
+            time.sleep(0.3)
+        logger.error("套取失败（%d 次重试后）", max_retries)
+        return False
+
+    def raise_up(self) -> bool:
+        """发 SERVO,RAISE 抬起释放目标。"""
+        if self._state.action == SleeveAction.RAISED:
+            return True
+
+        if not self._chassis.send_servo("RAISE"):
+            logger.warning("SERVO,RAISE 发送失败")
+            return False
+        self._chassis.wait_for("ACK,SERVO,RAISE", 0.5)
+        time.sleep(self._move_time_s)
+
+        released = self._state.holding_ids.copy()
+        self._state.action = SleeveAction.RAISED
+        self._state.position_mm = 0.0
+        self._state.holding_ids.clear()
+        self._state.holding_count = 0
+        logger.info(f"SERVO,RAISE 抬起释放: IDs={released}")
+        return True
+
+    def hold(self) -> bool:
+        self._state.action = SleeveAction.HOLD
+        return True
+
+    def is_holding(self) -> bool:
+        return self._state.holding_count > 0
+
+    def cleanup(self) -> None:
+        self.raise_up()

@@ -125,16 +125,47 @@ def main():
 
         perception = PerceptionPipeline(use_mock=use_mock, my_safe_zone_color=my_color)
         navigation = NavigationPipeline(field_layout, my_color=my_color, use_mock=use_mock)
-        transport = TransportPipeline(field_layout=field_layout, my_color=my_color, use_mock=use_mock)
         decision = DecisionEngine(perception.world_map, my_color=my_color)
         comm_manager = CommManager(state_machine=sm)
 
         # 创建串口底盘驱动（真机联调：电脑 USB-TTL 或 RDK 的 UART）
         chassis = None
+        camera = None
         if not use_mock:
             from .hardware.serial_chassis import SerialChassis
             chassis = SerialChassis(port=os.environ.get("CHASSIS_PORT", "/dev/ttyUSB0"))
             logger.info(f"已创建串口底盘驱动: {chassis._port} @ {chassis._baudrate}")
+            # 创建摄像头（真机视觉；CAM_INDEX 可配，默认 1=外接 USB）
+            try:
+                import cv2
+                cam_idx = int(os.environ.get("CAM_INDEX", "1"))
+                camera = cv2.VideoCapture(cam_idx)
+                if not camera.isOpened():
+                    logger.warning(f"摄像头 {cam_idx} 打开失败，感知将退化为 Mock")
+                    camera = None
+                else:
+                    logger.info(f"摄像头 {cam_idx} 打开成功")
+            except Exception as e:
+                logger.warning(f"创建摄像头失败: {e}")
+                camera = None
+
+        # 摄像头失败 → 感知降级为 Mock（避免 CVDetector 收 frame=None 崩溃）
+        if camera is None and not use_mock:
+            logger.warning("无可用摄像头，感知降级为 Mock（视觉不可用）")
+            perception = PerceptionPipeline(use_mock=True, my_safe_zone_color=my_color)
+            decision = DecisionEngine(perception.world_map, my_color=my_color)
+
+        # 转运管线：真机用串口舵机（发 SERVO 命令），Mock 用默认 MockSleeveLift
+        if chassis is not None:
+            from .transport.sleeve_lift import SerialServoLift
+            transport = TransportPipeline(
+                field_layout=field_layout, my_color=my_color, use_mock=False,
+                sleeve=SerialServoLift(chassis),
+            )
+        else:
+            transport = TransportPipeline(
+                field_layout=field_layout, my_color=my_color, use_mock=True,
+            )
 
         # 创建三个状态处理器
         boot_state = BootState(sm, system_checker, indicator)
@@ -146,6 +177,7 @@ def main():
             navigation=navigation,
             transport=transport,
             chassis=chassis,
+            camera=camera,
             field_layout=field_layout,
             my_color=my_color,
             use_mock=use_mock,

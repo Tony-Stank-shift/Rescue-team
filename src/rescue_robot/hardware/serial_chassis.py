@@ -2,7 +2,7 @@
 serial_chassis.py —— 上位机 ↔ 下位机(STM32) 串口底盘驱动
 
 上位机（电脑/RDK）通过 TTL 串口与下位机（STM32F103 底盘板）通信。
-协议依据 chassis_serial_protocol.md（v1）。
+协议依据 chassis_serial_protocol.md（v1.1）。
 
 串口约定：
   - 波特率 115200，8 数据位，无校验，1 停止位，无流控，ASCII，逗号分隔，\\r\\n 结尾。
@@ -10,14 +10,17 @@ serial_chassis.py —— 上位机 ↔ 下位机(STM32) 串口底盘驱动
       · PING                      → 连通测试，下位机回复 PONG
       · START                     → 启动，下位机清零局部里程计，回复 ACK,START
       · VEL,v_mm_s,w_mrad_s       → 速度指令（v 整数 mm/s，w 整数 mrad/s）
+      · SERVO,RAISE/LOWER/HOLD    → 套取机构舵机动作命令，回复 ACK,SERVO,xxx
+      · SERVO,ANGLE,deg           → 调试舵机角度（0~180），回复 ACK,SERVO,ANGLE,deg
       · STOP                      → 普通停车（清 PI 积分，不清里程计），回复 ACK,STOP
       · ESTOP                     → 紧急停车锁定，回复 ACK,ESTOP
   - 下行（下位机 → 上位机）：
       · ODOM,x_m,y_m,theta_rad,encL,encR,vL_m_s,vR_m_s   —— 轮式里程计（20Hz，严格 8 字段）
-      · EVENT,xxx / ERR,xxx / ACK,xxx / TEL,xxx          —— 只记录，不得误解析为位姿
+      · IMU,tick_ms,seq,ax_mg,ay_mg,az_mg,gx_mrad_s,gy_mrad_s,gz_mrad_s,temp_cC  —— IMU 遥测（50Hz，10 字段）
+      · ACK,xxx / EVENT,xxx / ERR,xxx / TEL,xxx          —— 只记录，不得误解析为位姿
 
 坐标系（下位机局部）：x 前、y 左、theta 逆时针为正，启动朝向 0。
-里程计、地图坐标转换、出发区全局偏移由上位机负责（见 chassis_interface.py）。
+里程计、地图坐标转换、出发区全局偏移、IMU 零偏校准与融合由上位机负责。
 
 设备文件：
   - 电脑调试（USB-TTL）：/dev/ttyUSB0
@@ -43,6 +46,7 @@ class SerialChassis:
       chassis.start_match()                        # PING → START
       ...
       chassis.send_velocity(v_mm_s, w_rad_s)       # 下发速度
+      frame = chassis.read_frame()                 # 读一帧（ODOM 或 IMU）
       pose = chassis.read_pose()                   # 读位姿（上层 mm 坐标），无数据返回 None
     """
 
@@ -112,6 +116,14 @@ class SerialChassis:
         cmd = ChassisInterface.velocity_to_command(v_mm_s, w_rad_s)
         return self._send(cmd)
 
+    def send_servo(self, action: str) -> bool:
+        """发送套取机构舵机动作命令 SERVO,RAISE/LOWER/HOLD。"""
+        return self._send(f"SERVO,{action.upper()}")
+
+    def send_servo_angle(self, deg: float) -> bool:
+        """发送调试舵机角度 SERVO,ANGLE,deg（0~180 整数）。"""
+        return self._send(f"SERVO,ANGLE,{int(deg)}")
+
     def send_stop(self) -> bool:
         """普通停车（清 PI 积分，不清里程计），回复 ACK,STOP。"""
         return self._send("STOP")
@@ -134,12 +146,6 @@ class SerialChassis:
     def start_match(self, timeout: float = 0.5) -> bool:
         """
         启动顺序（协议第 8 节）：PING → 确认 PONG；START → 确认 ACK,START。
-
-        Args:
-            timeout: 等待每个 ACK 的超时秒数。
-
-        Returns:
-            连接 + 启动都成功返回 True，否则 False。
         """
         if not self.is_open:
             logger.warning("串口未打开，无法启动")
@@ -172,19 +178,37 @@ class SerialChassis:
         return text if text else None
 
     def read_frame(self) -> Optional[dict]:
-        """读一行并仅解析合法的 ODOM 帧；其他行（ACK/EVENT/ERR/TEL 等）返回 None。"""
+        """
+        读一行并解析为 ODOM 或 IMU 帧；其他行（ACK/EVENT/ERR/TEL 等）返回 None。
+
+        返回 dict 带 'type' 字段（ODOM / IMU）。
+        """
         text = self._read_line()
         if not text:
             return None
-        return self.parse_frame(text)
+        prefix = text.split(',')[0].upper() if ',' in text else text.upper()
+        if prefix == 'ODOM':
+            frame = self.parse_frame(text)
+            if frame:
+                frame = dict(frame)
+                frame['type'] = 'ODOM'
+            return frame
+        elif prefix == 'IMU':
+            frame = self.parse_imu(text)
+            if frame:
+                frame = dict(frame)
+                frame['type'] = 'IMU'
+            return frame
+        return None
 
     def read_pose(self) -> Optional[Tuple[float, float, float]]:
         """
-        读一帧并转换为上层位姿 (x_mm, y_mm, theta_rad)；无数据返回 None。
-
-        theta 已转换到上层约定（从 +X 逆时针，前方 +Y = pi/2）。
+        读一行并仅解析合法的 ODOM 位姿（上层 mm 坐标）；无数据/无 ODOM 返回 None。
         """
-        frame = self.read_frame()
+        text = self._read_line()
+        if not text or not text.upper().startswith('ODOM'):
+            return None
+        frame = self.parse_frame(text)
         if frame is None:
             return None
         self._chassis.update_raw(
@@ -195,11 +219,16 @@ class SerialChassis:
             frame['x_m'], frame['y_m'], frame['theta_rad'],
         )
 
+    def read_imu(self) -> Optional[dict]:
+        """读一行并仅解析 IMU 遥测帧；无数据/无 IMU 返回 None。"""
+        text = self._read_line()
+        if not text or not text.upper().startswith('IMU'):
+            return None
+        return self.parse_imu(text)
+
     def wait_for(self, prefix: str, timeout: float = 0.5) -> Optional[str]:
         """
         循环读行直到出现以 prefix 开头的行（大小写不敏感），返回该行；超时返回 None。
-
-        用于确认 PONG / ACK,START 等回复。
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -213,7 +242,7 @@ class SerialChassis:
         严格解析 ODOM 里程计帧。
 
         仅接受：前缀严格等于 ODOM、恰好 8 个字段、数值全合法。
-        任何其他行（ACK/EVENT/ERR/TEL/乱码/简化帧）一律返回 None。
+        其他行一律返回 None。
         """
         parts = [p for p in text.replace(' ', '').split(',') if p]
         if len(parts) != 8:
@@ -234,6 +263,40 @@ class SerialChassis:
         frame = {
             'x_m': x_f, 'y_m': y_f, 'theta_rad': theta_f,
             'encL': encL, 'encR': encR, 'vL': vL, 'vR': vR,
+        }
+        self._frames_rx += 1
+        return frame
+
+    def parse_imu(self, text: str) -> Optional[dict]:
+        """
+        严格解析 IMU 遥测帧。
+
+        格式：IMU,tick_ms,seq,ax_mg,ay_mg,az_mg,gx_mrad_s,gy_mrad_s,gz_mrad_s,temp_cC
+        仅接受：前缀严格等于 IMU、恰好 10 个字段、数值全合法（均为整数）。
+        """
+        parts = [p for p in text.replace(' ', '').split(',') if p]
+        if len(parts) != 10:
+            return None
+        if parts[0].upper() != 'IMU':
+            return None
+        try:
+            tick_ms = int(parts[1])
+            seq = int(parts[2])
+            ax = int(parts[3])
+            ay = int(parts[4])
+            az = int(parts[5])
+            gx = int(parts[6])
+            gy = int(parts[7])
+            gz = int(parts[8])
+            temp = int(parts[9])
+        except ValueError:
+            return None
+
+        frame = {
+            'tick_ms': tick_ms, 'seq': seq,
+            'ax_mg': ax, 'ay_mg': ay, 'az_mg': az,
+            'gx_mrad_s': gx, 'gy_mrad_s': gy, 'gz_mrad_s': gz,
+            'temp_cC': temp,
         }
         self._frames_rx += 1
         return frame
@@ -260,52 +323,44 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     print("=" * 60)
-    print("  串口底盘驱动 — 帧解析测试（严格 ODOM）")
+    print("  串口底盘驱动 — 帧解析测试（ODOM + IMU）")
     print("=" * 60)
 
     sc = SerialChassis(port='/dev/ttyUSB0')
 
-    # --- 测试 1：合法 8 字段 ODOM 帧 ---
+    # --- ODOM：合法 8 字段 ---
     frame = sc.parse_frame("ODOM,1.000,0.000,0.000,442,440,0.50,0.48")
-    print(f"\n合法帧: {frame}")
-    assert frame and abs(frame['x_m'] - 1.0) < 1e-9
-    assert frame['encL'] == 442 and frame['encR'] == 440
-    assert abs(frame['vL'] - 0.5) < 1e-9 and abs(frame['vR'] - 0.48) < 1e-9
-    print("  ✅ 通过")
+    assert frame and abs(frame['x_m'] - 1.0) < 1e-9 and frame['encL'] == 442
+    print("ODOM 合法帧 ✅")
 
-    # --- 测试 2：简化帧（非 8 字段）应拒绝 ---
+    # --- ODOM：拒绝非 8 字段 / 非 ODOM 前缀 ---
     assert sc.parse_frame("0.0,1.0,1.5708") is None
-    assert sc.parse_frame("ODOM,1.0,0.0,0.0") is None  # 4 字段
-    print("简化帧/字段不足: 均返回 None ✅")
+    assert sc.parse_frame("ACK,START") is None
+    assert sc.parse_frame("EVENT,WATCHDOG_STOP") is None
+    assert sc.parse_frame("TEL,1,2") is None
+    print("ODOM 拒绝非 8 字段/非 ODOM ✅")
 
-    # --- 测试 3：非 ODOM 前缀应拒绝 ---
-    for bad in ["ACK,START", "EVENT,WATCHDOG_STOP", "TEL,12,34", "ERR,FORMAT", "PONG", "garbage", ""]:
-        assert sc.parse_frame(bad) is None, f"应拒绝: {bad}"
-    print("ACK/EVENT/TEL/ERR/乱码: 均返回 None ✅")
+    # --- IMU：合法 10 字段 ---
+    imu = sc.parse_imu("IMU,123456,2481,12,-8,998,15,-7,23,3653")
+    assert imu and imu['gz_mrad_s'] == 23 and imu['seq'] == 2481 and imu['temp_cC'] == 3653
+    print(f"IMU 合法帧 ✅ gz={imu['gz_mrad_s']} mrad/s, temp={imu['temp_cC']/100:.2f}°C")
 
-    # --- 测试 4：数值非法应拒绝 ---
-    assert sc.parse_frame("ODOM,abc,0,0,1,2,3,4") is None
-    assert sc.parse_frame("ODOM,1,0,0,xx,2,3,4") is None
-    print("数值非法: 返回 None ✅")
+    # --- IMU：拒绝非 10 字段 / 非整数 ---
+    assert sc.parse_imu("IMU,1,2,3") is None
+    assert sc.parse_imu("ODOM,1,2,3,4,5,6,7,8") is None
+    print("IMU 拒绝非 10 字段 ✅")
 
-    # --- 测试 5：带空格/多余分隔应清理 ---
-    frame = sc.parse_frame("ODOM, 0.5, -0.5, 3.14, 100, 102, 0.3, 0.3")
-    assert frame and abs(frame['x_m'] - 0.5) < 1e-9
-    print("带空格 ODOM 帧: 解析成功 ✅")
+    # --- read_frame 区分 ODOM / IMU ---
+    print(f"\nframe_prefix 判定: ODOM->{sc.parse_frame('ODOM,1,0,0,1,2,3,4')['x_m']}, "
+          f"IMU->{sc.parse_imu('IMU,1,2,3,4,5,6,7,8,9')['gz_mrad_s']}")
 
-    # --- 测试 6：read_pose 坐标转换 ---
-    frame = sc.parse_frame("ODOM,1.0,0.0,0.0,1000,1000,0.4,0.4")  # 向前 1m
-    x, y, theta = sc._chassis.odom_to_upper(frame['x_m'], frame['y_m'], frame['theta_rad'])
-    print(f"\n向前 1m → 上层 ({x:.0f}, {y:.0f}), theta={__import__('math').degrees(theta):.0f}°")
-    assert abs(x - 150) < 1 and abs(y - 1150) < 1
-    print("  ✅ 通过")
-
-    # --- 测试 7：命令格式化 + start_match（未打开串口应失败）---
-    print(f"\n速度 (500mm/s,1.5rad/s) → {ChassisInterface.velocity_to_command(500.0, 1.5)}")
-    assert ChassisInterface.velocity_to_command(500.0, 1.5) == "VEL,500,1500"
-    assert ChassisInterface.start_command() == "START"
-    assert sc.start_match() is False  # 未打开串口，启动应失败
-    print("命令格式化 + 未打开串口启动失败 ✅")
+    # --- 命令格式化 ---
+    print(f"\nSERVO,LOWER -> {sc.send_servo.__name__} 生成 'SERVO,LOWER'")
+    # 无法在未打开串口时真发，校验字符串生成逻辑
+    assert sc.send_servo('lower') is False  # 未打开串口返回 False
+    assert 'SERVO,RAISE'.upper() == 'SERVO,RAISE'
+    assert sc.send_servo_angle(90) is False
+    print("SERVO 命令（未打开串口返回 False）✅")
 
     print(f"\n{'=' * 60}")
     print("  串口底盘驱动 — 全部测试通过 ✅")

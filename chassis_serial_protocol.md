@@ -1,8 +1,12 @@
-# 上下位机底盘通信约定（v1）
+# 上下位机底盘通信约定（v1.1）
 
-本文档规定上位机（RDK/电脑）与 STM32F103 底盘控制器之间的串口协议、单位、坐标系和异常处理方式。双方实现均以本文档为准。
+本文档规定上位机（RDK/电脑）与 STM32F103C8 底盘控制器之间的串口协议、单位、坐标系、舵机控制、MPU6050 遥测和异常处理方式。双方实现均以本文档为准。
 
-> 当前状态：本文档中的 `VEL`、`ODOM`、里程计和通信看门狗是下一阶段正式接口，STM32 端尚未全部实现。现有 `RPM`、`TESTRPM`、`PWM`、`TESTPWM` 和 `TEL` 属于调试接口。
+> 当前状态：`VEL`、`ODOM`、通信看门狗和位置舵机命令均已在
+> STM32F103C8 固件中实现。MPU6050 的 I2C2 驱动、PB5 数据就绪中断和
+> 原始数据缓存已经实现；`IMU` 遥测帧是本 v1.1 约定，待接入 STM32
+> `Telemetry_Update()` 和上位机解析。`RPM`、`TESTRPM`、`PWM`、`TESTPWM`
+> 和 `TEL` 属于调试接口。
 
 ## 1. 固定硬件参数
 
@@ -14,6 +18,10 @@
 | 左右轮中心距 | 209 mm | 两个驱动轮接地点中心之间的距离 |
 | 最大目标轮速 | 250 RPM | STM32 速度闭环的软件限值 |
 | 电机测试电压 | 12 V | 当前速度参数和前馈参数的标定电压 |
+| MPU6050 I2C 地址 | `0x68` | AD0 下拉，使用默认地址 |
+| MPU6050 I2C 总线 | I2C2 | `SCL=PB10`，`SDA=PB11` |
+| MPU6050 数据就绪 | `PB5/EXTI9_5` | 上升沿触发，100 Hz 内部采样 |
+| 舵机 PWM | `PB6/TIM4_CH1` | 50 Hz，普通 180°位置舵机 |
 
 换算关系：
 
@@ -135,7 +143,42 @@ right_rpm = right_mm_s / 3.403392
 
 如果任意一侧超过 `250 RPM`，必须将左右轮目标按相同比例一起缩小，使较大的一侧恰好等于 `250 RPM`。不能分别独立裁剪，否则会改变转弯曲率。速度越界只做限幅，不返回错误。
 
-### 4.4 普通停车
+### 4.4 套取机构舵机
+
+套取机构使用普通 180°位置舵机，由 STM32 的 `PB6/TIM4_CH1` 输出
+50 Hz PWM。比赛流程使用动作命令，具体机械端点脉宽由 STM32 保存：
+
+```text
+SERVO,RAISE
+SERVO,LOWER
+SERVO,HOLD
+```
+
+| 命令 | 行为 |
+| --- | --- |
+| `SERVO,RAISE` | 转到安全抬起位置 |
+| `SERVO,LOWER` | 转到放下套取位置 |
+| `SERVO,HOLD` | 持续保持放下位置 |
+
+成功回复：
+
+```text
+ACK,SERVO,RAISE
+ACK,SERVO,LOWER
+ACK,SERVO,HOLD
+```
+
+调试时可以直接设置角度：
+
+```text
+SERVO,ANGLE,deg
+```
+
+`deg` 必须是 `0～180` 的整数；成功回复
+`ACK,SERVO,ANGLE,deg`，越界回复 `ERR,SERVO_ANGLE`。所有舵机命令必须在
+`START` 后执行；`ESTOP` 锁定后拒绝舵机动作。
+
+### 4.5 普通停车
 
 ```text
 STOP
@@ -151,7 +194,7 @@ STOP
 ACK,STOP
 ```
 
-### 4.5 紧急停车
+### 4.6 紧急停车
 
 ```text
 ESTOP
@@ -208,7 +251,107 @@ y += ds * sin(theta + dtheta / 2)
 theta = normalize(theta + dtheta)
 ```
 
-### 5.2 事件
+### 5.2 MPU6050 惯性数据
+
+MPU6050 通过 STM32 的 I2C2 连接：
+
+```text
+MPU6050 VCC → 5V（仅适用于带稳压、明确支持 3.3～5V 的模块）
+MPU6050 GND → GND
+MPU6050 SCL → PB10 / I2C2_SCL
+MPU6050 SDA → PB11 / I2C2_SDA
+MPU6050 INT → PB5 / EXTI9_5
+MPU6050 AD0 → NC（模块下拉，地址为 0x68）
+MPU6050 XDA → NC
+MPU6050 XCL → NC
+```
+
+STM32 内部配置为：
+
+```text
+I2C 速度：100 kHz
+加速度计量程：±2 g
+陀螺仪量程：±250 °/s
+内部采样率：100 Hz
+数据就绪中断：DATA_RDY，PB5 上升沿
+```
+
+`INT` 中断服务函数只设置数据就绪标志，不在中断中执行 I2C 读操作；主循环在收到标志后读取一帧 14 字节数据。这样不会在 EXTI 中断中阻塞 I2C，也不会影响电机控制和串口接收。
+
+#### 5.2.1 IMU 遥测帧
+
+建议 STM32 以 `50 Hz` 向上位机发送最新的有效 IMU 样本：
+
+```text
+IMU,tick_ms,seq,ax_mg,ay_mg,az_mg,gx_mrad_s,gy_mrad_s,gz_mrad_s,temp_cC\r\n
+```
+
+示例：
+
+```text
+IMU,123456,2481,12,-8,998,15,-7,23,3653\r\n
+```
+
+字段定义：
+
+| 字段 | 类型 | 单位 | 含义 |
+| --- | --- | --- | --- |
+| `tick_ms` | 无符号整数 | ms | STM32 采样时间 |
+| `seq` | 无符号整数 | 无 | IMU 成功采样序号 |
+| `ax_mg` | 有符号整数 | mg | X 轴加速度，`1000 mg = 1 g` |
+| `ay_mg` | 有符号整数 | mg | Y 轴加速度 |
+| `az_mg` | 有符号整数 | mg | Z 轴加速度 |
+| `gx_mrad_s` | 有符号整数 | mrad/s | X 轴角速度 |
+| `gy_mrad_s` | 有符号整数 | mrad/s | Y 轴角速度 |
+| `gz_mrad_s` | 有符号整数 | mrad/s | Z 轴角速度 |
+| `temp_cC` | 有符号整数 | 0.01 °C | MPU6050 芯片温度 |
+
+上例表示：
+
+```text
+ax = 0.012 g
+ay = -0.008 g
+az = 0.998 g
+gz = 0.023 rad/s
+temperature = 36.53 °C
+```
+
+上位机换算公式：
+
+```text
+accel_m_s2 = accel_mg * 9.80665 / 1000
+gyro_rad_s = gyro_mrad_s / 1000
+temperature_C = temp_cC / 100
+```
+
+上位机主要使用 `gz_mrad_s` 计算航向角速度：
+
+```text
+gz_rad_s = gz_mrad_s / 1000
+```
+
+`seq` 表示 STM32 成功读取样本的序号。由于 STM32 内部以 `100 Hz` 采样、以 `50 Hz` 对外发送，正常情况下相邻两帧的 `seq` 可能增加约 2，不要求每次只增加 1。上位机应使用 `seq` 判断是否收到新样本，使用 `tick_ms` 计算时间间隔。
+
+IMU 遥测帧不带 ACK。MPU6050 没有初始化成功或没有有效样本时，STM32 不得发送伪造的 `IMU` 数据。
+
+#### 5.2.2 IMU 零偏与融合
+
+第一版约定由上位机完成陀螺仪零偏校准：
+
+1. 上位机发送 `START` 后，让机器人保持静止。
+2. 连续收集约 `100～200` 个有效 `IMU` 帧。
+3. 计算 `gz_mrad_s` 的平均值作为 Z 轴零偏。
+4. 运行时执行：
+
+```text
+gz_corrected_rad_s = (gz_mrad_s - gz_bias_mrad_s) / 1000
+```
+
+5. 将 `gz_corrected_rad_s` 传给上位机的编码器 + IMU 航向融合器。
+
+当前上位机定位接口预留的单位为 `rad/s`。STM32 不在本协议中发送浮点数，也不在本版协议中发送已经扣除零偏的值；零偏参数由上位机保存和管理。
+
+### 5.3 事件
 
 ```text
 EVENT,WATCHDOG_STOP
@@ -218,7 +361,7 @@ EVENT,TEST_DONE
 - `WATCHDOG_STOP`：通信持续失联，STM32 已完成平滑停车。每次失联过程只发送一次。
 - `TEST_DONE`：定时调试指令执行完毕并已停车。
 
-### 5.3 错误
+### 5.4 错误
 
 ```text
 ERR,FORMAT
@@ -228,6 +371,8 @@ ERR,UNKNOWN
 ERR,NOT_STARTED
 ERR,LOCKED
 ERR,DURATION
+ERR,SERVO_ANGLE
+ERR,IMU_NOT_READY
 ```
 
 错误含义：
@@ -241,6 +386,8 @@ ERR,DURATION
 | `NOT_STARTED` | 尚未执行 `START` 就发送运动命令 |
 | `LOCKED` | 已进入紧急停车锁定状态 |
 | `DURATION` | 测试时间无效或超过上限 |
+| `SERVO_ANGLE` | 舵机调试角度超出 0～180°，或角度字段不是整数 |
+| `IMU_NOT_READY` | IMU 尚未完成初始化或尚无有效样本 |
 
 ## 6. 通信异常与自动恢复
 
@@ -308,9 +455,11 @@ TEL,tick_ms,left_target_rpm,left_actual_rpm,right_target_rpm,right_actual_rpm,le
 7. 正常结束发送 STOP；紧急情况发送 ESTOP
 ```
 
-## 9. v1 边界
+## 9. v1.1 边界
 
-- v1 使用 ASCII 文本，暂未加入序号和 CRC。解析必须严格，不能用错误帧刷新看门狗。
+- v1.1 使用 ASCII 文本，控制命令暂未加入命令序号和 CRC。解析必须严格，不能用错误帧刷新看门狗。
 - 如果实车电机干扰下仍出现可观测乱码，双方应一起升级协议，增加序号和 CRC；不能只改一端。
 - STM32 提供的是局部纯轮式里程计；传感器融合、地图坐标转换和出发区全局偏移由上位机负责。
+- `SERVO,RAISE`、`SERVO,LOWER`、`SERVO,HOLD` 和 `SERVO,ANGLE,deg` 已经在 STM32 和上位机侧约定并实现。
+- MPU6050 底层 I2C2 采样已经实现；`IMU,tick_ms,seq,...` 遥测帧及其上位机解析属于本 v1.1 接口，接入前不得假设上位机已经收到真实 IMU 数据。
 - 所有速度闭环参数目前基于 `12 V`、轮子架空测试结果，落地带载后必须重新验证并视情况调参。
