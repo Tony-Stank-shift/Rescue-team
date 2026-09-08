@@ -12,7 +12,8 @@ sleeve_lift.py —— 升降套取机构控制
 硬件抽象：
   AbstractSleeveLift  — 抽象基类
   MockSleeveLift      — 模拟套取机构（开发测试）
-  ScrewSleeveLift     — 丝杆升降（真实硬件，电机 + 上下限位，参数待定）
+  ServoSleeveLift     — SG90 舵机套取（0~90°，90mm 夹爪）
+  SerialServoLift     — 串口舵机套取（经下位机 SERVO 命令控制）
 """
 
 import logging
@@ -172,76 +173,6 @@ class MockSleeveLift(AbstractSleeveLift):
 # ============================================================
 # 丝杆升降套取机构 —— 真实硬件
 # ============================================================
-
-class ScrewSleeveLift(AbstractSleeveLift):
-    """
-    丝杆升降的真实套取机构。
-
-    单自由度：转轴（丝杆）旋转驱动上下移动，配上下限位开关。
-    ⚠️ 电机型号 / 驱动方式 / 引脚分配均待定，以下为占位实现。
-    """
-
-    def __init__(self,
-                 motor_pin: Optional[int] = None,
-                 upper_limit_pin: Optional[int] = None,
-                 lower_limit_pin: Optional[int] = None,
-                 stroke_mm: float = 150.0):
-        self._motor_pin = motor_pin
-        self._upper_limit_pin = upper_limit_pin
-        self._lower_limit_pin = lower_limit_pin
-
-        self._state = SleeveState(
-            action=SleeveAction.RAISED,
-            stroke_mm=stroke_mm,
-            timestamp=time.time(),
-        )
-
-        # 延迟导入硬件库
-        try:
-            import RPi.GPIO as GPIO
-            self._GPIO = GPIO
-            # 占位：实际接线与 PWM 驱动待定
-        except ImportError:
-            logger.warning("RPi.GPIO 未安装，套取机构控制不可用")
-
-        logger.info(f"ScrewSleeveLift 初始化: stroke={stroke_mm}mm（引脚/驱动待定）")
-
-    @property
-    def state(self) -> SleeveState:
-        return self._state
-
-    def lower(self, target_positions: Optional[dict] = None) -> bool:
-        self._state.action = SleeveAction.LOWERED
-        self._state.position_mm = self._state.stroke_mm
-        self._state.timestamp = time.time()
-
-        # 真实场景需要限位开关/电流检测判定是否到位
-        # 当前简化：默认下降成功
-        if target_positions:
-            self._state.holding_ids = set(target_positions.keys())
-            self._state.holding_count = len(target_positions)
-            self._state.action = SleeveAction.HOLD
-
-        return True
-
-    def raise_up(self) -> bool:
-        self._state.action = SleeveAction.RAISED
-        self._state.position_mm = 0.0
-        self._state.holding_ids.clear()
-        self._state.holding_count = 0
-        self._state.timestamp = time.time()
-        return True
-
-    def hold(self) -> bool:
-        self._state.action = SleeveAction.HOLD
-        return True
-
-    def is_holding(self) -> bool:
-        return self._state.holding_count > 0
-
-    def cleanup(self) -> None:
-        self.raise_up()
-
 
 # ============================================================
 # SG90 舵机套取机构 —— 真实硬件（已确认参数）

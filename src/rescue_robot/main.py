@@ -69,8 +69,9 @@ def _create_hardware(mode: str):
         logger = logging.getLogger("main")
         logger.info("🔧 运行模式: REAL (真实硬件)")
         from .system_check import RealHardwareChecker
-        button = GPIOButton(Pin.BUTTON_START)
-        indicator = LEDIndicator(Pin.LED_GREEN, Pin.LED_RED, Pin.BUZZER)
+        # 按钮/状态灯在下位机(F103)：上位机经串口交互（BUTTON,ON 事件 / 下位机 LED），不经 GPIO
+        button = MockButton()
+        indicator = MockIndicator()
         cam_idx = int(os.environ.get("CAM_INDEX", "1"))
         hw_checker = RealHardwareChecker(chassis=None, camera_index=cam_idx)
         logger.info("已创建真实硬件检查器（真机就绪后补全自检读取）")
@@ -230,6 +231,12 @@ def main():
             if current_state == RobotState.ERROR:
                 logger.error("状态机进入 ERROR，退出")
                 break
+            # 一键启动按钮在下位机(F103)：DEBUG 等待启动时轮询 BUTTON,ON → 触发 one_key_start
+            if current_state == RobotState.DEBUG and chassis is not None and chassis.is_open:
+                if chassis.read_button():
+                    logger.info("收到一键启动按钮事件 (BUTTON,ON)")
+                    sm.one_key_start()
+                    continue
             if current_state == RobotState.AUTONOMOUS:
                 # 已在主循环中运行，等待主循环结束或中断
                 status = sm.get_status()

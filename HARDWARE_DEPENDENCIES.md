@@ -63,8 +63,9 @@ RDK X5(上位机: Python+OpenCV+串口)
 ```
 MPU6050 VCC → 3.3V   （⚠️ 勿接 5V）
 MPU6050 GND → GND
-MPU6050 SCL → STM32 I2C SCL（如 PB6, I2C1）
-MPU6050 SDA → STM32 I2C SDA（如 PB7, I2C1）
+MPU6050 INT  → STM32 PB5 (MPU6050_INT)
+MPU6050 SCL  → STM32 PB10 (I2C2 SCL)
+MPU6050 SDA  → STM32 PB11 (I2C2 SDA)
 ```
 > ✅ **确认接 STM32**（下位机负责底盘 + 传感器）；上位机做融合时只需通过串口拿到带 yaw 校正的里程计。
 

@@ -13,15 +13,26 @@ from enum import IntEnum
 # ============================================================
 class Pin(IntEnum):
     """
-    GPIO 引脚分配（⚠️ 待定，占位值）。
+    下位机（STM32F103C8Tx）引脚参考 —— 上位机经串口控制，不直接 GPIO。
 
-    主控为地平线 RDK（非树莓派），需用 RDK 的 GPIO 接口（非 RPi.GPIO），
-    引脚编号体系与树莓派 BCM 不同，待硬件接线确定后填写。
+    按钮/状态灯/舵机/IMU 都在下位机（来自同学引脚图/原理图，用户确认）：
+      - 一键启动  START_BTN       = PB9  → 下位机发 BUTTON,ON 给上位机
+      - 状态灯    STATUS_LED      = PC13 → 下位机点亮（协议未含，下位机自行控制）
+      - 舵机      SERVO_PWM       = PB6  → 上位机发 SERVO 命令，下位机转 PWM
+      - 串口      USART1          = PA9(TX)/PA10(RX) → 上位机 serial_chassis
+      - 电机      LPWM=PA8 / RPWM=PA11 / MOTOR_STBY=PB8
+      - 编码器    LGMRA=PA0/LGMRB=PA1 / RGMRA=PA6/RGMRB=PA7
+      - IMU       MPU6050_INT=PB5 / MPU6050_SCL=PB10 / MPU6050_SDA=PB11 (I2C2)
+    上位机(主控 RDK)不经 GPIO 直连上述，逻辑走串口；此处仅记录供参考。
     """
-    BUTTON_START = 17       # 一键启动按钮（物理按钮，待定）
-    LED_GREEN = 22          # 绿色 LED（状态指示，待定）
-    LED_RED = 27            # 红色 LED（错误指示，待定）
-    BUZZER = 18             # 蜂鸣器（可选，待定）
+    BUTTON_START = 0        # 下位机 PB9 (START_BTN 一键启动)
+    LED_GREEN = 1           # 下位机 PC13 (STATUS_LED)
+    LED_RED = 2             # 预留
+    BUZZER = 3              # 预留（无）
+    SERVO_PWM = 4           # 下位机 PB6 (SERVO_PWM 舵机)
+    MPU6050_INT = 5         # 下位机 PB5 (MPU6050_INT)
+    MPU6050_SCL = 6         # 下位机 PB10 (MPU6050_SCL, I2C2)
+    MPU6050_SDA = 7         # 下位机 PB11 (MPU6050_SDA, I2C2)
 
 
 # ============================================================

@@ -97,8 +97,9 @@ class TargetSelector:
         # 对手因子
         opponent_factor = 0.5 if target.id in self._opponent_targets else 1.0
 
-        # 综合评分
-        score = points * distance_factor * time_factor * opponent_factor
+        # 综合评分：分值超线性(points^1.3)，避免"离得远的高分目标"被"近的低分目标"压过。
+        # 危险目标 points=0 → 分数必为 0，被 select_best 的 score>0 过滤。
+        score = (points ** 1.3) * distance_factor * time_factor * opponent_factor
 
         return ScoredTarget(
             target=target,
