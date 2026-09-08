@@ -100,13 +100,17 @@ START_ZONE_SIZE = 300       # 300×300mm
 START_ZONE_COLOR = "洋红色"
 
 # 安全区
-SAFE_ZONE_WIDTH = 600       # 估算值
-SAFE_ZONE_HEIGHT = 800      # 估算值
+SAFE_ZONE_WIDTH = 600       # 安全区内部宽（PDF 图7）
+SAFE_ZONE_HEIGHT = 300      # 安全区内部高（分区各 300×300）
+# 安全区在场地正中间（x 1200~1800，中心 1500），紫边 30 包围
+SAFE_ZONE_CENTER_X = 1500   # 安全区中心 x
+FENCE_THICKNESS_SAFE = 30   # 安全区紫色围栏厚度
 DIVIDER_SIZE = (300, 20, 20)  # 长×宽×高
 
-# 减速带
-SPEED_BUMP_WIDTH = 400      # 估算值
-SPEED_BUMP_SPACING = 50     # 间隔
+# 减速带（长 300 × 宽 60 × 高 10）
+SPEED_BUMP_LENGTH = 300     # 长（沿出发区边）
+SPEED_BUMP_DEPTH = 60       # 宽（伸出方向）
+SPEED_BUMP_SPACING = 50     # 间隔（出发区→第一条 50，每条间 50）
 SPEED_BUMP_COUNT = 3
 
 
@@ -154,12 +158,12 @@ class StandardFieldLayout:
             label="场地底边",
         ))
 
-        # --- 出发区（场地四角） ---
+        # --- 出发区（场地四角，洋红 300×300） ---
         start_positions = [
-            (0, FIELD_SIZE - START_ZONE_SIZE, "出发区 ①"),           # 左上
-            (FIELD_SIZE - START_ZONE_SIZE, FIELD_SIZE - START_ZONE_SIZE, "出发区 ②"),  # 右上
-            (0, 0, "出发区 ③"),                                      # 左下
-            (FIELD_SIZE - START_ZONE_SIZE, 0, "出发区 ④"),           # 右下
+            (0, FIELD_SIZE - START_ZONE_SIZE, "出发区 1"),           # 左上
+            (FIELD_SIZE - START_ZONE_SIZE, FIELD_SIZE - START_ZONE_SIZE, "出发区 2"),  # 右上
+            (0, 0, "出发区 3"),                                      # 左下
+            (FIELD_SIZE - START_ZONE_SIZE, 0, "出发区 4"),           # 右下
         ]
         for sx, sy, label in start_positions:
             self._elements.append(FieldElement(
@@ -170,89 +174,92 @@ class StandardFieldLayout:
                 label=label,
             ))
 
-        # --- 安全区 ---
-        # 红色安全区（场地左侧）
-        safe_zone_y = FIELD_SIZE - SAFE_ZONE_HEIGHT
-        red_safe_x = 100  # 距左边界
-        red_safe = RectRegion(red_safe_x, safe_zone_y,
-                              SAFE_ZONE_WIDTH, SAFE_ZONE_HEIGHT)
+        # --- 安全区（红顶/蓝底，正中间 x 1200~1800，内部 600×300，分区 300×300） ---
+        safe_x = SAFE_ZONE_CENTER_X - SAFE_ZONE_WIDTH / 2  # 1200
+        half_w = SAFE_ZONE_WIDTH / 2                        # 300
+
+        # 红色安全区（顶部，出发区1/2 之间）：物资区左 x[1200,1500]、伤员区右 x[1500,1800]
+        red_safe_y = FIELD_SIZE - SAFE_ZONE_HEIGHT - FENCE_THICKNESS_SAFE  # 2670（顶部留 30 紫边）
+        # 红色紫色围栏（紧贴，30mm，含上方）
         self._elements.append(FieldElement(
             id=(elem_id := elem_id + 1),
-            type=FieldElementType.SAFE_ZONE,
-            region=red_safe,
-            color="红色",
-            label="安全区 (红)",
-            metadata={"color_enum": SafeZoneColor.RED},
+            type=FieldElementType.PURPLE_FENCE,
+            region=RectRegion(safe_x - FENCE_THICKNESS_SAFE, red_safe_y - FENCE_THICKNESS_SAFE,
+                              SAFE_ZONE_WIDTH + 2 * FENCE_THICKNESS_SAFE,
+                              SAFE_ZONE_HEIGHT + 2 * FENCE_THICKNESS_SAFE),
+            color="紫色", label="紫色围栏 (红)", metadata={"safe_zone": SafeZoneColor.RED},
+        ))
+        self._elements.append(FieldElement(
+            id=(elem_id := elem_id + 1), type=FieldElementType.SAFE_ZONE,
+            region=RectRegion(safe_x, red_safe_y, SAFE_ZONE_WIDTH, SAFE_ZONE_HEIGHT),
+            color="红色", label="安全区 (红)", metadata={"color_enum": SafeZoneColor.RED},
+        ))
+        self._elements.append(FieldElement(
+            id=(elem_id := elem_id + 1), type=FieldElementType.SUPPLY_AREA,
+            region=RectRegion(safe_x, red_safe_y, half_w, SAFE_ZONE_HEIGHT),  # 物资区 左半
+            color="红色", label="物资区 (红)", metadata={"safe_zone": SafeZoneColor.RED, "area_type": "supply"},
+        ))
+        self._elements.append(FieldElement(
+            id=(elem_id := elem_id + 1), type=FieldElementType.INJURED_AREA,
+            region=RectRegion(safe_x + half_w, red_safe_y, half_w, SAFE_ZONE_HEIGHT),  # 伤员区 右半
+            color="红色", label="伤员区 (红)", metadata={"safe_zone": SafeZoneColor.RED, "area_type": "injured"},
         ))
 
-        # 红色安全区-物资区（上半）
+        # 蓝色安全区（底部，出发区3/4 之间）：伤员区左 x[1200,1500]、物资区右 x[1500,1800]
+        blue_safe_y = FENCE_THICKNESS_SAFE                  # 30（底部留 30 紫边）
         self._elements.append(FieldElement(
             id=(elem_id := elem_id + 1),
-            type=FieldElementType.SUPPLY_AREA,
-            region=RectRegion(red_safe_x, safe_zone_y + SAFE_ZONE_HEIGHT / 2,
-                              SAFE_ZONE_WIDTH / 2, SAFE_ZONE_HEIGHT / 2),
-            color="红色",
-            label="物资区 (红)",
-            metadata={"safe_zone": SafeZoneColor.RED, "area_type": "supply"},
+            type=FieldElementType.PURPLE_FENCE,
+            region=RectRegion(safe_x - FENCE_THICKNESS_SAFE, blue_safe_y - FENCE_THICKNESS_SAFE,
+                              SAFE_ZONE_WIDTH + 2 * FENCE_THICKNESS_SAFE,
+                              SAFE_ZONE_HEIGHT + 2 * FENCE_THICKNESS_SAFE),
+            color="紫色", label="紫色围栏 (蓝)", metadata={"safe_zone": SafeZoneColor.BLUE},
         ))
-
-        # 红色安全区-伤员区（下半）
         self._elements.append(FieldElement(
-            id=(elem_id := elem_id + 1),
-            type=FieldElementType.INJURED_AREA,
-            region=RectRegion(red_safe_x + SAFE_ZONE_WIDTH / 2, safe_zone_y + SAFE_ZONE_HEIGHT / 2,
-                              SAFE_ZONE_WIDTH / 2, SAFE_ZONE_HEIGHT / 2),
-            color="红色",
-            label="伤员区 (红)",
-            metadata={"safe_zone": SafeZoneColor.RED, "area_type": "injured"},
+            id=(elem_id := elem_id + 1), type=FieldElementType.SAFE_ZONE,
+            region=RectRegion(safe_x, blue_safe_y, SAFE_ZONE_WIDTH, SAFE_ZONE_HEIGHT),
+            color="蓝色", label="安全区 (蓝)", metadata={"color_enum": SafeZoneColor.BLUE},
         ))
-
-        # 蓝色安全区（场地右侧）
-        blue_safe_x = FIELD_SIZE - 100 - SAFE_ZONE_WIDTH
-        blue_safe = RectRegion(blue_safe_x, safe_zone_y,
-                               SAFE_ZONE_WIDTH, SAFE_ZONE_HEIGHT)
         self._elements.append(FieldElement(
-            id=(elem_id := elem_id + 1),
-            type=FieldElementType.SAFE_ZONE,
-            region=blue_safe,
-            color="蓝色",
-            label="安全区 (蓝)",
-            metadata={"color_enum": SafeZoneColor.BLUE},
+            id=(elem_id := elem_id + 1), type=FieldElementType.INJURED_AREA,
+            region=RectRegion(safe_x, blue_safe_y, half_w, SAFE_ZONE_HEIGHT),  # 伤员区 左半
+            color="蓝色", label="伤员区 (蓝)", metadata={"safe_zone": SafeZoneColor.BLUE, "area_type": "injured"},
         ))
-
-        # 蓝色安全区-物资区
         self._elements.append(FieldElement(
-            id=(elem_id := elem_id + 1),
-            type=FieldElementType.SUPPLY_AREA,
-            region=RectRegion(blue_safe_x, safe_zone_y + SAFE_ZONE_HEIGHT / 2,
-                              SAFE_ZONE_WIDTH / 2, SAFE_ZONE_HEIGHT / 2),
-            color="蓝色",
-            label="物资区 (蓝)",
-            metadata={"safe_zone": SafeZoneColor.BLUE, "area_type": "supply"},
+            id=(elem_id := elem_id + 1), type=FieldElementType.SUPPLY_AREA,
+            region=RectRegion(safe_x + half_w, blue_safe_y, half_w, SAFE_ZONE_HEIGHT),  # 物资区 右半
+            color="蓝色", label="物资区 (蓝)", metadata={"safe_zone": SafeZoneColor.BLUE, "area_type": "supply"},
         ))
 
-        # 蓝色安全区-伤员区
-        self._elements.append(FieldElement(
-            id=(elem_id := elem_id + 1),
-            type=FieldElementType.INJURED_AREA,
-            region=RectRegion(blue_safe_x + SAFE_ZONE_WIDTH / 2, safe_zone_y + SAFE_ZONE_HEIGHT / 2,
-                              SAFE_ZONE_WIDTH / 2, SAFE_ZONE_HEIGHT / 2),
-            color="蓝色",
-            label="伤员区 (蓝)",
-            metadata={"safe_zone": SafeZoneColor.BLUE, "area_type": "injured"},
-        ))
-
-        # --- 减速带（各出发区前方） ---
-        bump_start_y = SAFE_ZONE_HEIGHT + 200
+        # --- 减速带（长300×宽60，出发区两条内边各 3 根，边→第一条 50，每条间 50） ---
         for i, (sx, sy, _) in enumerate(start_positions):
+            # 水平内边：顶部出发区(1,2)内边=下边 sy；底部出发区(3,4)内边=上边 sy+300
+            horiz_edge = sy if sy > 0 else sy + START_ZONE_SIZE
+            # 垂直内边：左侧出发区(1,3)内边=右边 sx+300；右侧出发区(2,4)内边=左边 sx
+            vert_edge = sx + START_ZONE_SIZE if sx == 0 else sx
             for b in range(SPEED_BUMP_COUNT):
-                bump_y = bump_start_y + b * (SPEED_BUMP_SPACING + 10)  # 10mm bump width
+                off = SPEED_BUMP_SPACING + b * (SPEED_BUMP_DEPTH + SPEED_BUMP_SPACING)  # 50 + b*110
+                # 横向减速带（沿 x，长300）：顶部出发区朝下（y=sy-off-DEPTH），底部朝上（y=sy+300+off）
+                if sy > 0:  # 顶部出发区(1,2)
+                    y0 = horiz_edge - off - SPEED_BUMP_DEPTH
+                    rx = sx
+                else:       # 底部出发区(3,4)
+                    y0 = horiz_edge + off
+                    rx = sx
                 self._elements.append(FieldElement(
-                    id=(elem_id := elem_id + 1),
-                    type=FieldElementType.SPEED_BUMP,
-                    region=RectRegion(sx, bump_y, START_ZONE_SIZE, 10),
-                    color="减速带",
-                    label=f"减速带 出发区{i+1}-{b+1}",
+                    id=(elem_id := elem_id + 1), type=FieldElementType.SPEED_BUMP,
+                    region=RectRegion(rx, y0, SPEED_BUMP_LENGTH, SPEED_BUMP_DEPTH),
+                    color="减速带", label=f"减速带 出发区{i+1}-横{b+1}",
+                ))
+                # 纵向减速带（沿 y，长300）：左侧出发区(1,3)朝右（x=sx+300+off），右侧(2,4)朝左（x=sx-off-DEPTH）
+                if sx == 0:  # 左侧出发区(1,3)
+                    x0 = vert_edge + off
+                else:        # 右侧出发区(2,4)
+                    x0 = vert_edge - off - SPEED_BUMP_DEPTH
+                self._elements.append(FieldElement(
+                    id=(elem_id := elem_id + 1), type=FieldElementType.SPEED_BUMP,
+                    region=RectRegion(x0, sy, SPEED_BUMP_DEPTH, SPEED_BUMP_LENGTH),
+                    color="减速带", label=f"减速带 出发区{i+1}-纵{b+1}",
                 ))
 
         logger.info(f"标准场地布局构建完成: {len(self._elements)} 个元素")

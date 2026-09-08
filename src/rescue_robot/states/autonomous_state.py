@@ -58,6 +58,7 @@ class AutonomousState:
                  navigation: Optional[NavigationPipeline] = None,
                  transport: Optional[TransportPipeline] = None,
                  chassis: Optional[SerialChassis] = None,
+                 camera=None,
                  field_layout: Optional[FieldLayout] = None,
                  my_color: SafeZoneColor = SafeZoneColor.RED,
                  use_mock: bool = True,
@@ -71,6 +72,7 @@ class AutonomousState:
             navigation: 导航管线（None 则内部创建 Mock）
             transport: 转运管线（None 则内部创建 Mock）
             chassis: 串口底盘驱动（SerialChassis），真机联调用；None 则用导航定位器 + controller
+            camera: cv2.VideoCapture 实例，真机视觉；None 则感知用 frame=None（Mock）
             field_layout: 场地布局（None 则用标准场地）
             my_color: 本队安全区颜色（抽签确定）
             use_mock: True=内部创建 Mock 定位/检测
@@ -80,6 +82,7 @@ class AutonomousState:
         self._indicator = indicator
         self._controller = controller
         self._chassis = chassis  # SerialChassis 实例（真机：位姿来源 + 速度下发）
+        self._camera = camera  # cv2.VideoCapture 实例（真机视觉读帧）
 
         # ── 四大管线（注入或内部创建）──
         self._field = field_layout or FieldLayout.standard()
@@ -222,8 +225,17 @@ class AutonomousState:
         grip_done = self._trip_gripped
         release_done = self._trip_released
 
-        # ── 1. 感知 ──
-        self._perception.update(frame=None, robot_position=(x, y))
+        # ── 1. 感知（真机：读摄像头帧 → CVDetector；否则 frame=None → Mock）──
+        frame = None
+        if self._camera is not None:
+            try:
+                ok, frame = self._camera.read()
+                if not ok:
+                    frame = None
+            except Exception as e:
+                logger.warning(f"读取摄像头失败: {e}")
+                frame = None
+        self._perception.update(frame=frame, robot_position=(x, y))
 
         # ── 2. 决策 ──
         action = self._decision.update(

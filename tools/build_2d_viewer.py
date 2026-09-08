@@ -259,23 +259,27 @@ function drawScene() {
   }
   ctx.strokeStyle = '#555'; ctx.lineWidth = 3; ctx.strokeRect(ox, oy, 3*scale, 3*scale);
 
-  // Safe zones (red left, blue right; field_elements: 100..700 / 2300..2900, y 2200..3000)
-  ctx.fillStyle = 'rgba(239,83,80,0.28)'; ctx.fillRect(ox+0.1*scale, oy+2.2*scale, 0.6*scale, 0.8*scale);
-  ctx.fillStyle = 'rgba(66,165,245,0.28)'; ctx.fillRect(ox+2.3*scale, oy+2.2*scale, 0.6*scale, 0.8*scale);
-  ctx.strokeStyle = '#ef5350'; ctx.lineWidth = 1.5; ctx.strokeRect(ox+0.1*scale, oy+2.2*scale, 0.6*scale, 0.8*scale);
-  ctx.strokeStyle = '#42a5f5'; ctx.strokeRect(ox+2.3*scale, oy+2.2*scale, 0.6*scale, 0.8*scale);
-  // sub-areas (supply / injured)
+  // Safe zones (red top, blue bottom; x 1.2~1.8, red y 2.67~2.97, blue y 0.03~0.33)
+  ctx.fillStyle = 'rgba(239,83,80,0.28)'; ctx.fillRect(ox+1.2*scale, oy+2.67*scale, 0.6*scale, 0.3*scale);
+  ctx.fillStyle = 'rgba(66,165,245,0.28)'; ctx.fillRect(ox+1.2*scale, oy+0.03*scale, 0.6*scale, 0.3*scale);
+  // 紫色围栏（30mm）
+  ctx.strokeStyle = '#9c27b0'; ctx.lineWidth = 2;
+  ctx.strokeRect(ox+1.17*scale, oy+2.64*scale, 0.66*scale, 0.36*scale);
+  ctx.strokeRect(ox+1.17*scale, oy+0*scale, 0.66*scale, 0.36*scale);
+  ctx.strokeStyle = '#ef5350'; ctx.lineWidth = 1.5; ctx.strokeRect(ox+1.2*scale, oy+2.67*scale, 0.6*scale, 0.3*scale);
+  ctx.strokeStyle = '#42a5f5'; ctx.strokeRect(ox+1.2*scale, oy+0.03*scale, 0.6*scale, 0.3*scale);
+  // 分区（红：物资左/伤员右；蓝：伤员左/物资右）
   ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
-  ctx.strokeRect(ox+0.1*scale, oy+2.6*scale, 0.3*scale, 0.4*scale);
-  ctx.strokeRect(ox+0.4*scale, oy+2.6*scale, 0.3*scale, 0.4*scale);
-  ctx.strokeRect(ox+2.3*scale, oy+2.6*scale, 0.3*scale, 0.4*scale);
-  ctx.strokeRect(ox+2.6*scale, oy+2.6*scale, 0.3*scale, 0.4*scale);
-  ctx.fillStyle = '#ef5350'; ctx.font = '11px system-ui'; ctx.fillText('红队安全区(物|伤)', ox+0.1*scale+4, oy+2.24*scale);
-  ctx.fillStyle = '#42a5f5'; ctx.fillText('蓝队安全区(物|伤)', ox+2.3*scale+4, oy+2.24*scale);
+  ctx.strokeRect(ox+1.2*scale, oy+2.67*scale, 0.3*scale, 0.3*scale);
+  ctx.strokeRect(ox+1.5*scale, oy+2.67*scale, 0.3*scale, 0.3*scale);
+  ctx.strokeRect(ox+1.2*scale, oy+0.03*scale, 0.3*scale, 0.3*scale);
+  ctx.strokeRect(ox+1.5*scale, oy+0.03*scale, 0.3*scale, 0.3*scale);
+  ctx.fillStyle = '#ef5350'; ctx.font = '11px system-ui'; ctx.fillText('红队安全区(物|伤)', ox+1.2*scale+4, oy+2.6*scale);
+  ctx.fillStyle = '#42a5f5'; ctx.fillText('蓝队安全区(伤|物)', ox+1.2*scale+4, oy+0.36*scale);
 
-  // Start zones
+  // Start zones (四角：1左上 2右上 3左下 4右下)
   ctx.fillStyle = 'rgba(206,147,216,0.3)';
-  const starts = [[0,0],[2.7,0],[2.7,2.7],[0,2.7]];
+  const starts = [[0,2.7],[2.7,2.7],[0,0],[2.7,0]];
   starts.forEach(([sx,sy]) => ctx.fillRect(ox+sx*scale, oy+sy*scale, 0.3*scale, 0.3*scale));
   ctx.strokeStyle = '#ce93d8'; ctx.lineWidth = 1;
   starts.forEach(([sx,sy]) => ctx.strokeRect(ox+sx*scale, oy+sy*scale, 0.3*scale, 0.3*scale));

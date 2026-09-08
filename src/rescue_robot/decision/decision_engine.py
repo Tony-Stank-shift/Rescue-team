@@ -491,16 +491,16 @@ class DecisionEngine:
         return (tx, ty)
 
     def _get_supply_area_position(self) -> Tuple[float, float]:
-        """获取本队物资区中心位置"""
+        """获取本队物资区中心位置（安全区 x 1200~1800，物资区各占一侧半区）"""
         if self._my_color == SafeZoneColor.RED:
-            return (200.0, 2800.0)
-        return (2700.0, 2800.0)
+            return (1350.0, 2820.0)   # 红物资区（左半）中心
+        return (1650.0, 180.0)        # 蓝物资区（右半）中心
 
     def _get_injured_area_position(self) -> Tuple[float, float]:
         """获取本队伤员区中心位置"""
         if self._my_color == SafeZoneColor.RED:
-            return (500.0, 2800.0)
-        return (2400.0, 2800.0)
+            return (1650.0, 2820.0)   # 红伤员区（右半）中心
+        return (1350.0, 180.0)        # 蓝伤员区（左半）中心
 
     # ---- 查询 ----
 

@@ -15,22 +15,22 @@ field:
     blue_left:   { x: 0,    y: 2700, width: 300, height: 300 }
     blue_right:  { x: 2700, y: 2700, width: 300, height: 300 }
 
-  # 安全区
+  # 安全区（红顶/蓝底，正中间 x 1200~1800，内部 600×300，分区 300×300，紫边 30）
   safe_zones:
     red:
-      x: 50
-      y: 2550
+      x: 1200
+      y: 2670
       width: 600
-      height: 400
-      supply_area:   { x: 50,  y: 2750, width: 300, height: 200 }
-      injured_area:  { x: 350, y: 2750, width: 300, height: 200 }
+      height: 300
+      supply_area:   { x: 1200, y: 2670, width: 300, height: 300 }   # 物资区（左）
+      injured_area:  { x: 1500, y: 2670, width: 300, height: 300 }   # 伤员区（右）
     blue:
-      x: 2350
-      y: 2550
+      x: 1200
+      y: 30
       width: 600
-      height: 400
-      supply_area:   { x: 2350, y: 2750, width: 300, height: 200 }
-      injured_area:  { x: 2650, y: 2750, width: 300, height: 200 }
+      height: 300
+      supply_area:   { x: 1500, y: 30, width: 300, height: 300 }     # 物资区（右）
+      injured_area:  { x: 1200, y: 30, width: 300, height: 300 }     # 伤员区（左）
 
   # 禁区
   forbidden:

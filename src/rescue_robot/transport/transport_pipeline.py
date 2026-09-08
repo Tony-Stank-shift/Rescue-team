@@ -241,7 +241,7 @@ class TransportPipeline:
             # 物资区/伤员区中心）：到达投放点附近才投放，避免在安全区边缘提前释放。
             if nav is not None and nav.target is not None:
                 dist = self._distance((rx, ry), nav.target)
-                if dist < 150:  # 与套取范围的到达容差一致
+                if dist < 80:  # 到达投放点（窄安全区 300 高，容差收紧保证投放准确）
                     self._phase = TransportPhase.PLACING
                     logger.debug(f"到达投放点: dist={dist:.0f}mm")
 

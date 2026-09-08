@@ -90,12 +90,12 @@ class IntegratedSim:
     # 仿真（autonomous loop 层）用套取范围做到达判定，覆盖这一区间。
     ARRIVE_TOLERANCE_MM = 120.0
 
-    # 出发区中心（mm），编号沿用 README 1-4 号（左/右/上/下）
+    # 出发区中心（mm），对齐 field_elements：1 左上 2 右上 3 左下 4 右下
     START_CENTERS = {
-        1: (150.0, 150.0),     # 左下
-        2: (2850.0, 150.0),    # 右下
-        3: (2850.0, 2850.0),   # 右上
-        4: (150.0, 2850.0),    # 左上
+        1: (150.0, 2850.0),    # 左上
+        2: (2850.0, 2850.0),   # 右上
+        3: (150.0, 150.0),     # 左下
+        4: (2850.0, 150.0),    # 右下
     }
 
     def __init__(self,
@@ -159,10 +159,11 @@ class IntegratedSim:
         self._prev_current_id = None
         self._last_action = None
 
-        # 出发位姿
+        # 出发位姿（初始朝向场地中心，避免贴边出发）
         sx, sy = self.START_CENTERS.get(self.start_zone, self.START_CENTERS[1])
-        self._pose = (sx, sy, 0.0)
-        self.nav.reset_pose(sx, sy, 0.0)
+        start_theta = math.atan2(1500.0 - sy, 1500.0 - sx)
+        self._pose = (sx, sy, start_theta)
+        self.nav.reset_pose(sx, sy, start_theta)
         self.nav.clear_target()
         self.transport.reset()
 
@@ -224,16 +225,17 @@ class IntegratedSim:
         return None
 
     def _random_position(self) -> Tuple[float, float]:
-        """随机生成一个可用目标位置（mm），避开禁区/出发区/场地中央。"""
+        """随机生成一个可用目标位置（mm），避开安全区/出发区，尽量在场地中央。"""
         avoid = [
-            (100, 2200, 700, 3000),      # 红安全区
-            (2300, 2200, 2900, 3000),    # 蓝安全区
-            (0, 0, 300, 300), (2700, 0, 3000, 300),
-            (2700, 2700, 3000, 3000), (0, 2700, 300, 3000),
+            (1200, 2640, 1800, 3000),   # 红安全区（顶）
+            (1200, 0, 1800, 360),       # 蓝安全区（底）
+            (0, 0, 300, 300), (2700, 0, 3000, 300),       # 出发区3/4
+            (2700, 2700, 3000, 3000), (0, 2700, 300, 3000),  # 出发区2/1
         ]
         for _ in range(5000):
-            x = random.uniform(200, 2800)
-            y = random.uniform(350, 2650)
+            # 目标尽量在场地中央区域（安全区在顶/底，中央不冲突）
+            x = random.uniform(500, 2500)
+            y = random.uniform(500, 2500)
             # 避开场地中央（决策引擎把中央 <500mm 视为"裁判重放"，会造成目标重选抖动）
             if math.hypot(x - 1500, y - 1500) < 600:
                 continue
