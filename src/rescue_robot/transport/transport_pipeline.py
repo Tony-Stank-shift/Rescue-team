@@ -98,6 +98,12 @@ class TransportPipeline:
         self._total_targets_delivered = 0
         self._total_score = 0
 
+        # 放置（推+上调）框架参数 —— ⚠️ 真机需标定
+        self._place_steps = 4           # 放置分步上调次数
+        self._place_step = 0            # 当前放置步
+        self._place_started = False     # 是否已开始推式放置
+        self._push_dist_mm = 100.0      # 推入斜坡距离（真机标定）
+
         logger.info("TransportPipeline 初始化")
 
     # ---- 属性 ----
@@ -246,21 +252,47 @@ class TransportPipeline:
                     logger.debug(f"到达投放点: dist={dist:.0f}mm")
 
         elif self._phase == TransportPhase.PLACING:
-            # 投放
+            # 推式放置（框架）：底盘前推入斜坡 + 舵机渐进上调，分步完成。
+            # ⚠️ 推入方向/距离/分步节奏需真机标定；与决策 nav.target 的协同需确认。
+            if not self._place_started:
+                self._place_started = True
+                self._place_step = 0
+                # 仅真机机构（有舵机角度控制）才设"推入点"；Mock/仿真保持投放点以免投放偏移
+                if (hasattr(self._sleeve, 'set_angle')
+                        or hasattr(self._sleeve, 'send_servo_angle')) \
+                        and nav is not None and nav.target is not None:
+                    tx, ty = nav.target
+                    dx, dy = tx - rx, ty - ry
+                    d = (dx * dx + dy * dy) ** 0.5
+                    if d > 1e-6:
+                        nav.set_target(tx + dx / d * self._push_dist_mm,
+                                       ty + dy / d * self._push_dist_mm)
+
+            # 分步上调：仅真机机构（有舵机角度控制）分步；Mock/仿真一次释放
+            if (hasattr(self._sleeve, 'set_angle')
+                    or hasattr(self._sleeve, 'send_servo_angle')) \
+                    and self._place_step < self._place_steps:
+                self._place_step += 1
+                frac = self._place_step / self._place_steps
+                deg = 90.0 * (1.0 - frac)
+                if hasattr(self._sleeve, 'set_angle'):
+                    self._sleeve.set_angle(deg)
+                else:
+                    self._sleeve.send_servo_angle(int(round(deg)))
+                return self._get_status()   # 未释放，等待下一帧继续推+上调
+
+            # 步伐走完 → 投放判定 + 释放
             positions = [(rx, ry)] * len(self._current_targets)
             infos = [t.info for t in self._current_targets]
-
             results = self._placer.classify_batch(positions, infos)
             all_valid = all(r.is_valid for r in results)
 
-            # 放置：优先"推+上调"（跨紫边斜坡），无 place_ramp 则回退抬起释放
             if hasattr(self._sleeve, 'place_ramp'):
                 released = self._sleeve.place_ramp()
             else:
                 released = self._sleeve.raise_up()
 
             if released:
-                # 投放完成
                 self._load_mgr.release_all(placement_ok=all_valid)
                 self._total_trips += 1
                 self._total_targets_delivered += len(self._current_targets)
