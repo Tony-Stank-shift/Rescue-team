@@ -253,8 +253,11 @@ class TransportPipeline:
             results = self._placer.classify_batch(positions, infos)
             all_valid = all(r.is_valid for r in results)
 
-            # 升起释放
-            released = self._sleeve.raise_up()
+            # 放置：优先"推+上调"（跨紫边斜坡），无 place_ramp 则回退抬起释放
+            if hasattr(self._sleeve, 'place_ramp'):
+                released = self._sleeve.place_ramp()
+            else:
+                released = self._sleeve.raise_up()
 
             if released:
                 # 投放完成

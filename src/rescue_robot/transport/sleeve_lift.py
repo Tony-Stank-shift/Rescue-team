@@ -355,6 +355,29 @@ class ServoSleeveLift(AbstractSleeveLift):
         self._state.timestamp = time.time()
         # TODO: 真实 PWM 输出（RDK/STM32 的 PWM 接口）
 
+    # 放置（推+上调）：U型槽后方实心板，推入时渐进上调跨过紫边斜坡（外低内高）
+    RAMP_ANGLE_DEG = 34.0   # 斜坡角度（30 宽 / 20 高 ≈ 34°）
+    RAMP_STEPS = 4          # 渐进上调步数
+
+    def place_ramp(self) -> bool:
+        """放置：舵机从 90°(套住) 渐进下调到 0°(放平)，配合底盘前进"推"入放置区。
+
+        ⚠️ 精确角度序列 / 与底盘前进的协同需真机标定（SG90 定位，斜坡 34°）。
+        """
+        released = self._state.holding_ids.copy()
+        for step in range(self.RAMP_STEPS + 1):
+            frac = step / self.RAMP_STEPS
+            deg = self.ANGLE_LOWERED_DEG * (1.0 - frac)  # 90 → 0
+            self.set_angle(deg)
+            time.sleep(0.15)
+        self._state.action = SleeveAction.RAISED
+        self._state.position_mm = 0.0
+        self._state.holding_ids.clear()
+        self._state.holding_count = 0
+        self._state.timestamp = time.time()
+        logger.info(f"放置(推+上调): 渐进放平释放 IDs={released}")
+        return True
+
     def cleanup(self) -> None:
         self.raise_up()
 
@@ -458,6 +481,28 @@ class SerialServoLift(AbstractSleeveLift):
 
     def is_holding(self) -> bool:
         return self._state.holding_count > 0
+
+    # 放置（推+上调）：U型槽后方实心板，推入时渐进上调跨过紫边斜坡（外低内高）
+    RAMP_ANGLE_DEG = 34.0
+    RAMP_STEPS = 4
+
+    def place_ramp(self) -> bool:
+        """放置：发 SERVO,ANGLE 渐进上调（90→0），配合底盘前进"推"入放置区。
+
+        ⚠️ 精确角度序列 / 与底盘前进协同需真机标定（斜坡 34°，SG90 定位）。
+        """
+        released = self._state.holding_ids.copy()
+        for step in range(self.RAMP_STEPS + 1):
+            frac = step / self.RAMP_STEPS
+            deg = int(round(90.0 * (1.0 - frac)))  # 90 → 0
+            self._chassis.send_servo_angle(deg)
+            time.sleep(self._move_time_s / self.RAMP_STEPS)
+        self._state.action = SleeveAction.RAISED
+        self._state.position_mm = 0.0
+        self._state.holding_ids.clear()
+        self._state.holding_count = 0
+        logger.info(f"放置(推+上调): 渐进放平释放 IDs={released}")
+        return True
 
     def cleanup(self) -> None:
         self.raise_up()

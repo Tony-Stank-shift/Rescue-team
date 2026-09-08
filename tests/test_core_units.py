@@ -145,7 +145,7 @@ def test_field_layout_new_safe_zone():
                 if e.type == FieldElementType.SUPPLY_AREA
                 and e.metadata.get("safe_zone") == SafeZoneColor.RED]
     assert len(supplies) == 1
-    assert supplies[0].region.width == 300 and supplies[0].region.height == 300
+    assert supplies[0].region.width == 290 and supplies[0].region.height == 300
     # 蓝色安全区（底）y[30,330]
     blue = _sz(SafeZoneColor.BLUE)
     assert blue[0].region.y == 30 and blue[0].region.y_max == 330
