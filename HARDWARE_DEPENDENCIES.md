@@ -13,7 +13,7 @@
 ```
 电脑(上位机: Python+OpenCV+串口)
    ├─ USB 摄像头（cv2.VideoCapture(0)）
-   └─ USB-TTL 串口 ── STM32(F407: USART1 PA9/PA10) 底盘
+   └─ USB-TTL 串口 ── STM32(F103: USART1 PA9/PA10) 底盘
 ```
 
 **对软件的影响**：
@@ -99,7 +99,7 @@ MPU6050 SDA → STM32 I2C SDA（如 PB7, I2C1）
 **协议**：依据 `chassis_serial_protocol.md`（v1）。
 
 **结论**：
-- 下位机底盘板：**STM32F407VETx（LQFP100）**，串口用 **USART1**（TX=PA9，RX=PA10）。
+- 下位机底盘板：**STM32F103**（丝印 Rescue-F103；具体型号/封装待确认），串口用 **USART1**（TX=PA9，RX=PA10）。
 - 波特率：**115200**，8/无/1/无流控，ASCII，逗号分隔，`\r\n` 结尾。
 - 上行（上位机→下位机）：`PING`(→PONG)、`START`(→ACK,START，清里程计)、`VEL,v_mm_s,w_mrad_s`、`STOP`(→ACK,STOP)、`ESTOP`(→ACK,ESTOP)。
 - 下行（下位机→上位机）：`ODOM,x_m,y_m,theta_rad,encL,encR,vL_m_s,vR_m_s`（**严格 8 字段**）；`EVENT`/`ERR`/`ACK`/`TEL` 只记录不解析。
@@ -114,7 +114,7 @@ MPU6050 SDA → STM32 I2C SDA（如 PB7, I2C1）
 
 ---
 
-## 6b. 下位机底盘引脚（STM32F407，参考）
+## 6b. 下位机底盘引脚（STM32F103，参考）
 
 - 左电机 PWM：PA6（LPWM）；右电机 PWM：PB5（RPWM）
 - 左编码器 A/B：PE9/PE11（LGMRA/LGMRB）；右编码器 A/B：PD12/PD13（RGMRA/RGMRB）

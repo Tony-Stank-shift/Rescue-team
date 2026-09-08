@@ -35,9 +35,9 @@ HSV_RANGES: Dict[TargetColor, Tuple[Tuple[int, int, int], Tuple[int, int, int]]]
     TargetColor.YELLOW:    ((22, 100, 100), (35, 255, 255)),   # 黄色
     TargetColor.GREEN:     ((40, 80, 60), (80, 255, 255)),     # 绿色
     TargetColor.BLUE:      ((95, 80, 60), (125, 255, 255)),    # 蓝色
-    TargetColor.ORANGE:    ((8, 100, 100), (20, 255, 255)),    # 橘色
+    TargetColor.ORANGE:    ((4, 205, 35), (24, 255, 255)),   # 橘色（H 4~24 认橙，S≥205 排红色，红 S≤201）
     TargetColor.BLACK:     ((0, 0, 0), (179, 255, 60)),        # 黑色（低 V）
-    TargetColor.LIGHT_BLUE:((85, 40, 100), (105, 200, 255)),   # 浅蓝
+    TargetColor.LIGHT_BLUE:((85, 50, 110), (108, 255, 255)),   # 浅蓝（S 上限放宽到 255）
     TargetColor.BROWN:     ((10, 100, 50), (25, 200, 150)),    # 棕色
     TargetColor.WHITE:     ((0, 0, 180), (179, 30, 255)),      # 白色（低 S）
 }

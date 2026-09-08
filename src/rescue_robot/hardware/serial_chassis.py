@@ -1,7 +1,7 @@
 """
 serial_chassis.py —— 上位机 ↔ 下位机(STM32) 串口底盘驱动
 
-上位机（电脑/RDK）通过 TTL 串口与下位机（STM32F407 底盘板）通信。
+上位机（电脑/RDK）通过 TTL 串口与下位机（STM32F103 底盘板）通信。
 协议依据 chassis_serial_protocol.md（v1）。
 
 串口约定：
