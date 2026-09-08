@@ -153,6 +153,9 @@ class WebSocketServer(AbstractCommServer):
     """
     基于 asyncio 的真实 WebSocket 服务器。
 
+    ⚠️ 过时：上位机↔下位机(STM32)通信用 hardware/serial_chassis（串口），
+    本类为笔记本调试遗留（旧 WebSocket 方案），未接实际通信。
+
     需要: pip install websockets
     端口: 8765
     """

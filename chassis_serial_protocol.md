@@ -251,6 +251,18 @@ y += ds * sin(theta + dtheta / 2)
 theta = normalize(theta + dtheta)
 ```
 
+### 5.1.1 一键启动按钮事件
+
+板上 `ON` 按键按下后，STM32 立即上报一次（上升沿触发，勿重复）：
+
+```text
+BUTTON,ON
+```
+
+- 上位机收到 `BUTTON,ON` 后进入 `AUTONOMOUS` 状态（一键启动）。
+- 每次按键只上报一次，避免串口积压。
+- `ESTOP` 锁定后，`BUTTON` 不产生事件。
+
 ### 5.2 MPU6050 惯性数据
 
 MPU6050 通过 STM32 的 I2C2 连接：

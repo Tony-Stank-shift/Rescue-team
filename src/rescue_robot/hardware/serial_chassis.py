@@ -237,6 +237,17 @@ class SerialChassis:
                 return text
         return None
 
+    def wait_for_button(self, timeout: float = 5.0) -> bool:
+        """等待一键启动按钮事件（下位机发 BUTTON,ON）；返回是否收到。"""
+        return self.wait_for("BUTTON,ON", timeout) is not None
+
+    def read_button(self) -> Optional[str]:
+        """读一行，若为按钮事件(BUTTON,ON)返回该行，否则返回 None。"""
+        text = self._read_line()
+        if text and text.upper().startswith("BUTTON"):
+            return text
+        return None
+
     def parse_frame(self, text: str) -> Optional[dict]:
         """
         严格解析 ODOM 里程计帧。

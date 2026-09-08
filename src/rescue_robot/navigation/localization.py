@@ -171,6 +171,9 @@ class OdometryLocalizer(AbstractLocalizer):
     """
     真实定位器：编码器里程计 + IMU 姿态融合。
 
+    ⚠️ 注：真实运行中上位机位姿来自串口（下位机合成 + ChassisInterface 转换），
+    本定位器保留作参考/测试，不用于主定位。
+
     使用互补滤波（简化版 EKF）：
     - 位置：主要由里程计积分
     - 朝向：IMU 陀螺仪短期 + 里程计长期校正

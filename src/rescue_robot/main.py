@@ -68,11 +68,12 @@ def _create_hardware(mode: str):
     elif mode == RunMode.REAL:
         logger = logging.getLogger("main")
         logger.info("🔧 运行模式: REAL (真实硬件)")
+        from .system_check import RealHardwareChecker
         button = GPIOButton(Pin.BUTTON_START)
         indicator = LEDIndicator(Pin.LED_GREEN, Pin.LED_RED, Pin.BUZZER)
-        # TODO: 替换为真实 HardwareChecker
-        hw_checker = MockHardwareChecker()
-        logger.warning("⚠️  硬件检查器仍为 Mock，请实现真实 HardwareChecker")
+        cam_idx = int(os.environ.get("CAM_INDEX", "1"))
+        hw_checker = RealHardwareChecker(chassis=None, camera_index=cam_idx)
+        logger.info("已创建真实硬件检查器（真机就绪后补全自检读取）")
     else:
         raise ValueError(f"未知运行模式: {mode}，可选: {RunMode.MOCK}, {RunMode.REAL}")
 
@@ -154,6 +155,10 @@ def main():
             logger.warning("无可用摄像头，感知降级为 Mock（视觉不可用）")
             perception = PerceptionPipeline(use_mock=True, my_safe_zone_color=my_color)
             decision = DecisionEngine(perception.world_map, my_color=my_color)
+
+        # 若使用真实硬件检查器，注入串口底盘（自检 IMU/电机连通用）
+        if hasattr(hw_checker, "_chassis"):
+            hw_checker._chassis = chassis
 
         # 转运管线：真机用串口舵机（发 SERVO 命令），Mock 用默认 MockSleeveLift
         if chassis is not None:

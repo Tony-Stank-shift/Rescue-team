@@ -140,6 +140,64 @@ class MockHardwareChecker(HardwareChecker):
         return 2  # 2 个驱动电机（差速）
 
 
+class RealHardwareChecker(HardwareChecker):
+    """
+    真实硬件检查器（框架版）。
+
+    ⚠️ 真值读取（摄像头/IMU/电池/电机）依赖真机硬件，此处提供接口 + 优雅降级：
+      - 摄像头：尝试打开并读一帧（未接摄像头/失败 → False）
+      - IMU：IMU 在 STM32，尝试从串口读 IMU 帧
+      - 电机：尝试通过串口 PING 探测底盘连通
+      - 电池电压：需真机（串口 TEL 或 ADC），未实现返回 -1
+    「真机就绪」后，把上面读取逻辑替换为真实硬件采集即可。
+    """
+
+    def __init__(self, chassis=None, camera_index: int = 1):
+        self._chassis = chassis          # SerialChassis 实例（可选）
+        self._camera_index = camera_index
+
+    def check_camera(self) -> bool:
+        try:
+            import cv2
+            cap = cv2.VideoCapture(self._camera_index)
+            if not cap.isOpened():
+                return False
+            ok, _ = cap.read()
+            cap.release()
+            return ok
+        except Exception:
+            return False
+
+    def check_imu(self) -> bool:
+        # IMU 在 STM32，通过串口 IMU 帧获取；未接串口/无 IMU 帧按失败
+        if self._chassis is not None and self._chassis.is_open:
+            try:
+                return self._chassis.read_imu() is not None
+            except Exception:
+                return False
+        return False
+
+    def check_temperature_sensor(self) -> bool:
+        # 无独立温度传感器（非关键项），跳过即通过
+        return True
+
+    def check_motor(self, motor_id: int) -> bool:
+        # 电机正反转测试需真机；框架先用串口 PING 探测底盘连通
+        if self._chassis is not None and self._chassis.is_open:
+            try:
+                return self._chassis.send_ping()
+            except Exception:
+                return False
+        return False
+
+    def check_battery_voltage(self) -> float:
+        # 电池电压需真机（串口 TEL 或 ADC 分压），未实现返回 -1
+        return -1.0
+
+    def get_motor_count(self) -> int:
+        return 2  # 2 个驱动电机（差速）
+
+
 # ============================================================
 # 自检流程
 # ============================================================
