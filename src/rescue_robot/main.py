@@ -136,7 +136,11 @@ def main():
         if not use_mock:
             from .hardware.serial_chassis import SerialChassis
             chassis = SerialChassis(port=os.environ.get("CHASSIS_PORT", "/dev/ttyUSB0"))
-            logger.info(f"已创建串口底盘驱动: {chassis._port} @ {chassis._baudrate}")
+            # 必须显式 open()：否则 is_open=False，自检的 IMU/电机 会误判失败，且后续无法下发 VEL
+            if not chassis.open():
+                logger.error(f"串口打开失败: {chassis._port}（请检查接线 / dialout 权限）")
+            logger.info(f"已创建串口底盘驱动: {chassis._port} @ {chassis._baudrate} "
+                        f"(is_open={chassis.is_open})")
             # 创建摄像头（真机视觉；CAM_INDEX 可配，默认 1=外接 USB）
             try:
                 import cv2

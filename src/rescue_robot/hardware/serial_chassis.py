@@ -103,9 +103,14 @@ class SerialChassis:
 
     # ---- 发送（上行） ----
 
-    def send_ping(self) -> bool:
-        """连通测试：发 PING，下位机回复 PONG。"""
-        return self._send("PING")
+    def send_ping(self, timeout: float = 0.5) -> bool:
+        """连通测试：发 PING 并等待 PONG（返回是否真的收到 PONG 应答）。
+
+        原实现只返回"写入成功"，未校验 PONG，导致自检/联调误判为连通。
+        """
+        if not self._send("PING"):
+            return False
+        return self.wait_for("PONG", timeout) is not None
 
     def send_start(self) -> bool:
         """启动命令：下位机收到后清零局部里程计，回复 ACK,START。"""
@@ -219,12 +224,17 @@ class SerialChassis:
             frame['x_m'], frame['y_m'], frame['theta_rad'],
         )
 
-    def read_imu(self) -> Optional[dict]:
-        """读一行并仅解析 IMU 遥测帧；无数据/无 IMU 返回 None。"""
-        text = self._read_line()
-        if not text or not text.upper().startswith('IMU'):
-            return None
-        return self.parse_imu(text)
+    def read_imu(self, timeout: float = 0.5) -> Optional[dict]:
+        """循环读行直到拿到 IMU 遥测帧（串口为 IMU/ODOM/TEL 混流）。
+
+        只读一行会大概率命中 ODOM/TEL 而误判"无 IMU"，故按超时循环读取。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            text = self._read_line()
+            if text and text.upper().startswith('IMU'):
+                return self.parse_imu(text)
+        return None
 
     def wait_for(self, prefix: str, timeout: float = 0.5) -> Optional[str]:
         """

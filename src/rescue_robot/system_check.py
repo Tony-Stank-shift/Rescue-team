@@ -10,6 +10,7 @@ system_check.py —— 系统自检
 """
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -157,6 +158,10 @@ class RealHardwareChecker(HardwareChecker):
         self._camera_index = camera_index
 
     def check_camera(self) -> bool:
+        # 台架调试（未接摄像头）可设 SKIP_CAMERA_CHECK=1 跳过该项
+        if os.environ.get("SKIP_CAMERA_CHECK", "").strip().lower() in ("1", "true", "yes"):
+            logger.info("SKIP_CAMERA_CHECK=1，跳过摄像头自检（台架调试）")
+            return True
         try:
             import cv2
             cap = cv2.VideoCapture(self._camera_index)
@@ -289,7 +294,9 @@ class SystemChecker:
         def _check() -> bool:
             voltage = self._hw.check_battery_voltage()
             if voltage < 0:
-                return False
+                # 本车未接电压传感器 → 视为"未知"，不计为失败（原实现直接 FAIL 会卡住启动）
+                logger.info("电池电压: 未接电压传感器（未知），跳过该项")
+                return True
             if voltage < thresholds.BATTERY_MIN_VOLTAGE:
                 logger.warning(f"电池电压偏低: {voltage:.1f}V (最低 {thresholds.BATTERY_MIN_VOLTAGE}V)")
                 return False
