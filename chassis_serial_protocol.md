@@ -148,7 +148,8 @@ right_rpm = right_mm_s / 3.403392
 套取机构使用普通 180°位置舵机，由 STM32 的 `PB6/TIM4_CH1` 输出
 50 Hz PWM。比赛流程使用动作命令，具体机械端点脉宽由 STM32 保存：
 
-> 套取机构（SG90）**实际行程 0°~70°**（平行地面 ⇄ 下压套住，同学确认）；
+> 套取机构（SG90）**实际行程 0°~70°**（对齐下位机 `servo.h`）：
+> **0° = 下压套住（LOWERED，1000us）**、**70° = 抬起释放（RAISED，1778us）**；
 > 舵机物理范围仍是 0~180°，上层只使用 0~70° 这一段。
 
 ```text
@@ -256,15 +257,16 @@ theta = normalize(theta + dtheta)
 
 ### 5.1.1 一键启动按钮事件
 
-板上 `ON` 按键按下后，STM32 立即上报一次（上升沿触发，勿重复）：
+板上 `ON` 按键（自锁开关，START_BTN=PB9）按下后，STM32 立即上报一次：
 
 ```text
-BUTTON,ON
+EVENT,START_BUTTON
 ```
 
-- 上位机收到 `BUTTON,ON` 后进入 `AUTONOMOUS` 状态（一键启动）。
-- 每次按键只上报一次，避免串口积压。
-- `ESTOP` 锁定后，`BUTTON` 不产生事件。
+- 上位机收到 `EVENT,START_BUTTON` 后进入 `AUTONOMOUS` 状态（一键启动）。
+- 按键为**自锁开关**：运行中再拨动只上报 `EVENT,BUTTON_LED_ON` / `EVENT,BUTTON_LED_OFF`（仅控制状态灯，不动电机）。
+- `ESTOP` 锁定后不再产生启动事件。
+- 其他事件：`EVENT,WATCHDOG_STOP`（速度看门狗停车）、`EVENT,TEST_DONE`（限时测试结束）。
 
 ### 5.2 MPU6050 惯性数据
 

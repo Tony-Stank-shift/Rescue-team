@@ -274,7 +274,7 @@ class TransportPipeline:
                     and self._place_step < self._place_steps:
                 self._place_step += 1
                 frac = self._place_step / self._place_steps
-                deg = 70.0 * (1.0 - frac)
+                deg = frac * 70.0   # 0 → 70（套住→释放，对齐下位机 servo.h）
                 if hasattr(self._sleeve, 'set_angle'):
                     self._sleeve.set_angle(deg)
                 else:

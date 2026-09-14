@@ -182,21 +182,21 @@ class ServoSleeveLift(AbstractSleeveLift):
     """
     SG90 舵机驱动的套取机构（从上往下套住目标）。
 
-    已确认参数：
+    已确认参数（对齐下位机 servo.h：RAISED=70° / LOWERED=0°）：
       - 舵机：SG90（PWM 控制）
-      - 行程：0°（平行地面，释放）⇄ 70°（下压套住，同学确认范围 0~70°）
+      - 行程：0°（下压/套住）⇄ 70°（抬起/释放）
       - 夹爪臂长：90mm
 
     状态映射：
-      - RAISED  = 0°（夹爪平行地面，抬起）
-      - LOWERED = 70°（下压套住）
-      - HOLD    = 70°（套住目标运送中）
+      - RAISED  = 70°（抬起/释放）
+      - LOWERED = 0°（下压套住）
+      - HOLD    = 0°（套住目标运送中）
 
     ⚠️ PWM 输出到真实舵机由硬件层实现（pwm_pin 待定），当前记录角度。
     """
 
-    ANGLE_RAISED_DEG = 0.0    # 平行地面（释放）
-    ANGLE_LOWERED_DEG = 70.0  # 下压套住（同学确认范围 0~70°）
+    ANGLE_RAISED_DEG = 70.0   # 抬起/释放（对齐下位机 servo.h）
+    ANGLE_LOWERED_DEG = 0.0   # 下压套住
     MOVE_TIME_S = 0.4         # 0°↔70° 移动耗时
 
     def __init__(self, pwm_pin: Optional[int] = None,
@@ -291,14 +291,15 @@ class ServoSleeveLift(AbstractSleeveLift):
     RAMP_STEPS = 4          # 渐进上调步数
 
     def place_ramp(self) -> bool:
-        """放置：舵机从 70°(套住) 渐进下调到 0°(放平)，配合底盘前进"推"入放置区。
+        """放置：舵机从 0°(套住) 渐进抬起到 70°(释放)，配合底盘前进"推"入放置区。
 
         ⚠️ 精确角度序列 / 与底盘前进的协同需真机标定（SG90 定位，斜坡 34°）。
         """
         released = self._state.holding_ids.copy()
         for step in range(self.RAMP_STEPS + 1):
             frac = step / self.RAMP_STEPS
-            deg = self.ANGLE_LOWERED_DEG * (1.0 - frac)  # 70 → 0
+            deg = self.ANGLE_LOWERED_DEG + \
+                frac * (self.ANGLE_RAISED_DEG - self.ANGLE_LOWERED_DEG)  # 0 → 70
             self.set_angle(deg)
             time.sleep(0.15)
         self._state.action = SleeveAction.RAISED
@@ -414,19 +415,21 @@ class SerialServoLift(AbstractSleeveLift):
         return self._state.holding_count > 0
 
     # 放置（推+上调）：U型槽后方实心板，推入时渐进上调跨过紫边斜坡（外低内高）
-    ANGLE_LOWERED_DEG = 70.0    # 下压套住（同学确认范围 0~70°）
+    ANGLE_LOWERED_DEG = 0.0     # 下压套住（对齐下位机 servo.h）
+    ANGLE_RAISED_DEG = 70.0     # 抬起/释放
     RAMP_ANGLE_DEG = 34.0
     RAMP_STEPS = 4
 
     def place_ramp(self) -> bool:
-        """放置：发 SERVO,ANGLE 渐进上调（70→0），配合底盘前进"推"入放置区。
+        """放置：发 SERVO,ANGLE 渐进抬起（0→70），配合底盘前进"推"入放置区。
 
         ⚠️ 精确角度序列 / 与底盘前进协同需真机标定（斜坡 34°，SG90 定位）。
         """
         released = self._state.holding_ids.copy()
         for step in range(self.RAMP_STEPS + 1):
             frac = step / self.RAMP_STEPS
-            deg = int(round(self.ANGLE_LOWERED_DEG * (1.0 - frac)))  # 70 → 0
+            deg = int(round(self.ANGLE_LOWERED_DEG +
+                            frac * (self.ANGLE_RAISED_DEG - self.ANGLE_LOWERED_DEG)))  # 0 → 70
             self._chassis.send_servo_angle(deg)
             time.sleep(self._move_time_s / self.RAMP_STEPS)
         self._state.action = SleeveAction.RAISED

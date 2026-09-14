@@ -16,7 +16,7 @@ class Pin(IntEnum):
     下位机（STM32F103C8Tx）引脚参考 —— 上位机经串口控制，不直接 GPIO。
 
     按钮/状态灯/舵机/IMU 都在下位机（来自同学引脚图/原理图，用户确认）：
-      - 一键启动  START_BTN       = PB9  → 下位机发 BUTTON,ON 给上位机
+      - 一键启动  START_BTN       = PB9  → 下位机发 EVENT,START_BUTTON 给上位机
       - 状态灯    STATUS_LED      = PC13 → 下位机点亮（协议未含，下位机自行控制）
       - 舵机      SERVO_PWM       = PB6  → 上位机发 SERVO 命令，下位机转 PWM
       - 串口      USART1          = PA9(TX)/PA10(RX) → 上位机 serial_chassis
