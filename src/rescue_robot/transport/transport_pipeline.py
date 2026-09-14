@@ -274,7 +274,7 @@ class TransportPipeline:
                     and self._place_step < self._place_steps:
                 self._place_step += 1
                 frac = self._place_step / self._place_steps
-                deg = 90.0 * (1.0 - frac)
+                deg = 70.0 * (1.0 - frac)
                 if hasattr(self._sleeve, 'set_angle'):
                     self._sleeve.set_angle(deg)
                 else:
