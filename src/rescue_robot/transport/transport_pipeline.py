@@ -108,6 +108,12 @@ class TransportPipeline:
         # 套取失败重试（抬爪 + 后退 + 重新接近），超过次数才放弃本趟
         self._capture_retries = 0
 
+        # 注入项（由 AutonomousState 绑定真机硬件）：
+        self._stop_cb = None        # 显式停车回调（套取前必须让底盘真停）
+        self._sleeve_confirm = None  # 套取视觉确认回调（本车无硬件套住传感器）
+        self._confirm_fail_streak = 0   # 视觉确认连续失败次数（用于自动失效保护）
+        self.MAX_CONFIRM_FAILS = 5      # 连续失败多少此后自动关闭视觉确认
+
         logger.info("TransportPipeline 初始化")
 
     # ---- 属性 ----
@@ -170,6 +176,44 @@ class TransportPipeline:
 
     def is_idle(self) -> bool:
         return self._phase in (TransportPhase.IDLE, TransportPhase.COMPLETE)
+
+    # ---- 真机注入 ----
+
+    def set_stop_callback(self, fn) -> None:
+        """注入"立即停车"回调（绑定到串口底盘的 send_stop）。"""
+        self._stop_cb = fn
+
+    def set_sleeve_confirm(self, fn) -> None:
+        """注入"槽内是否有目标"的视觉确认回调（无硬件套住传感器时使用）。
+
+        返回 True=槽内有目标（视为套住），False=槽内空（视为没套住 → 重试）。
+        """
+        self._sleeve_confirm = fn
+
+    def _halt_for_capture(self, nav) -> None:
+        """
+        进入套取前**显式停车**。
+
+        为什么必须做：套取会阻塞主循环若干秒（舵机动作 + time.sleep），
+        期间没有任何 VEL 下发 → 下位机只能靠速度看门狗（300ms 保持 / 800ms 停）
+        被动停车，而这 800ms 里底盘仍在执行最后一帧速度指令，可能前冲几十厘米
+        把目标撞飞/推走。显式停车让"套取时车静止"变成确定的事。
+
+        两步：① 清导航目标（否则主循环恢复后导航又朝目标走）
+              ② 立刻下发零速度 + STOP
+        """
+        if nav is not None:
+            try:
+                nav.clear_target()
+            except Exception as e:
+                logger.warning(f"清导航目标失败: {e}")
+        if self._stop_cb is not None:
+            try:
+                self._stop_cb()
+            except Exception as e:
+                logger.warning(f"显式停车回调失败: {e}")
+        else:
+            logger.warning("未注入停车回调：套取期间底盘靠看门狗停车（可能前冲）")
 
     def _begin_retreat(self, rx: float, ry: float, rtheta: float, nav) -> None:
         """套取失败后：抬起夹爪 → 朝目标反方向后退 RETREAT_MM → 准备重试。
@@ -251,7 +295,9 @@ class TransportPipeline:
                 dist = self._distance((rx, ry), target.position)
                 if dist < 150:  # 到达套取范围
                     self._phase = TransportPhase.CAPTURING
-                    logger.debug(f"到达目标附近: dist={dist:.0f}mm")
+                    # 显式停车：清导航目标 + 立即下发停车，保证套取全程底盘静止
+                    self._halt_for_capture(nav)
+                    logger.info(f"到达目标附近: dist={dist:.0f}mm — 已显式停车，开始套取")
                 # 否则导航继续（由 autonomous loop 调用 nav 完成）
 
         elif self._phase == TransportPhase.CAPTURING:
@@ -263,6 +309,27 @@ class TransportPipeline:
                 positions = {t.id: t.position for t in self._current_targets}
                 # 下降套住
                 success = self._sleeve.lower_with_retry(positions, max_retries=3)
+                # 无硬件"套住检测"→ 用摄像头确认 U 型槽里确实套住了目标。
+                # 不可靠的确认（异常）按成功处理，避免误判导致无休止重试。
+                if success and self._sleeve_confirm is not None:
+                    try:
+                        confirmed = bool(self._sleeve_confirm())
+                    except Exception as e:
+                        logger.warning(f"套取视觉确认异常({e})，按成功处理")
+                        confirmed = True
+                    if not confirmed:
+                        self._confirm_fail_streak += 1
+                        # 失效保护：一直"确认不了"通常说明 ROI 没标定 or 摄像头看不到槽，
+                        # 此时自动关闭确认，避免机器人卡在"失败→重试→放弃"的死循环里。
+                        if self._confirm_fail_streak >= self.MAX_CONFIRM_FAILS:
+                            logger.error(
+                                f"视觉确认连续 {self._confirm_fail_streak} 次判失败 → 自动关闭视觉确认；"
+                                "请检查 Camera.SLEEVE_ROI 是否已按真机标定")
+                            self._sleeve_confirm = None
+                        logger.warning("视觉确认：U 型槽内未见目标 → 判为套取失败，将抬爪后退重试")
+                        success = False
+                    else:
+                        self._confirm_fail_streak = 0
                 if success:
                     for t in self._current_targets:
                         ok, v = self._load_mgr.load(t.info, t.id)

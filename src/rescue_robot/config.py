@@ -97,9 +97,16 @@ class Camera:
        反解出倾角。倾角误差对远处距离影响很大。
     """
     HEIGHT_MM: float = 210.0      # 光心离地高度 (mm)
-    TILT_DEG: float = 30.0        # 下倾角（相对水平，向下为正）—— ⚠️ 待标定
+    TILT_DEG: float = 30.0        # 下倾角（相对水平，向下为正）—— 已确认 30°
     FOV_DEG: float = 77.0         # 视场角（硬件：800W 77°）
     RES: tuple = (640, 480)       # 处理分辨率 (W, H)
+
+    # ── 套取视觉确认（本车无硬件"套住检测"，用摄像头看 U 型槽是否有目标）──
+    # U 型槽在图像中的区域，**归一化**坐标 (x1, y1, x2, y2)，相对图像宽高 ∈ [0,1]。
+    # ⚠️ 必须真机标定：把目标放进槽里，看槽落在图像哪个区域，再把这里改成实测值。
+    SLEEVE_ROI: tuple = (0.32, 0.55, 0.68, 0.98)
+    # 是否启用套取视觉确认（ROI 未标定/看不到槽时可先关掉）
+    SLEEVE_CONFIRM: bool = True
 
 
 camera = Camera()
@@ -109,6 +116,8 @@ CAMERA_HEIGHT_MM = Camera.HEIGHT_MM
 CAMERA_TILT_DEG = Camera.TILT_DEG
 CAMERA_FOV_DEG = Camera.FOV_DEG
 CAMERA_RES = Camera.RES
+SLEEVE_ROI = Camera.SLEEVE_ROI
+SLEEVE_CONFIRM = Camera.SLEEVE_CONFIRM
 
 
 # ============================================================

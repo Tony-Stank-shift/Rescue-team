@@ -100,6 +100,19 @@ class AutonomousState:
             self._perception.world_map, my_color=my_color,
         )
 
+        # ── 套取的两项注入（真机必需）──
+        # ① 显式停车：套取会阻塞主循环若干秒，必须主动停车，
+        #    否则底盘会一直执行最后一帧速度指令，靠看门狗 ~800ms 后才停（会前冲一段）。
+        if chassis is not None:
+            self._transport.set_stop_callback(self._stop_chassis)
+        # ② 套取视觉确认：本车没有"套住检测"传感器 → 用摄像头看 U 型槽里有没有目标。
+        #    只在真机摄像头可用时启用（Mock/无摄像头时保持"假设成功"，避免误判重试）。
+        if camera is not None:
+            self._transport.set_sleeve_confirm(self._perception.check_sleeve_occupied)
+            logger.info("已启用套取视觉确认（槽内 ROI 判据）")
+        else:
+            logger.info("无摄像头：套取不启用视觉确认（按接住处理）")
+
         # 主循环控制
         self._loop_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -306,6 +319,24 @@ class AutonomousState:
             return
         if self._navigation.target != pos:
             self._navigation.set_target(pos[0], pos[1])
+
+    def _stop_chassis(self) -> None:
+        """
+        显式停车（供转运管线在套取前调用）。
+
+        先发零速度让速度环目标归零，再发 STOP 让下位机立即停速度环。
+        不这样做的话：套取阶段主循环被阻塞、没人发 VEL，
+        下位机要等速度看门狗（300ms 保持 / 800ms 停）才停 —— 期间底盘仍在
+        执行最后一帧速度指令，可能前冲几十厘米把目标撞飞。
+        """
+        if self._chassis is None:
+            return
+        try:
+            self._chassis.send_velocity(0.0, 0.0)
+            self._chassis.send_stop()
+            logger.info("🛑 显式停车（套取前）")
+        except Exception as e:
+            logger.warning(f"显式停车失败: {e}")
 
     # ---- 看门狗 ----
 

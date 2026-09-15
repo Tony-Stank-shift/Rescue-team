@@ -24,7 +24,7 @@ from .target_types import (
     DetectedTarget, TargetInfo, TargetType, TargetStatus,
     get_point_value,
 )
-from .field_elements import FieldLayout
+from .field_elements import FieldLayout, FieldElementType
 
 logger = logging.getLogger("world_map")
 
@@ -84,16 +84,25 @@ class WorldMap:
     # 关联阈值：两个检测被视为同一目标的最大距离（mm）
     ASSOCIATION_DISTANCE_MM = 100.0
 
-    # 目标被认为稳定跟踪的最小检测次数
+    # 目标被确认成立所需的连续检测次数（新检测先入"待确认"缓冲，
+    # 连续命中这么多次才升级为真目标）——用于过滤 HSV 单帧误检。
     MIN_SEEN_COUNT = 3
 
-    # 目标被移除前的最大丢失帧数
-    MAX_LOST_COUNT = 30  # ~0.6 秒（50Hz）
+    # 待确认检测的存活帧数（超过则丢弃，避免缓冲区无限增长）
+    PENDING_MAX_AGE = 30
+
+    # 目标被移除前的最大丢失帧数（50Hz 下 150 ≈ 3s）
+    # 原值 30（0.6s）过激进：短暂遮挡/转头就删目标，之后重新检测会生成
+    # 【新 id、状态 ACTIVE】，导致已投放进安全区的目标被再次选中（重复扑空）。
+    MAX_LOST_COUNT = 150
 
     def __init__(self, field_layout: Optional[FieldLayout] = None):
         self._targets: Dict[int, TrackedTarget] = {}
         self._field = field_layout
         self._next_id = 1000  # 全局目标 ID（与 DetectedTarget.id 区分）
+
+        # 待确认检测缓冲：[{info, position, hits, age}]
+        self._pending: List[dict] = []
 
         # 统计
         self._update_count = 0
@@ -127,14 +136,41 @@ class WorldMap:
         return [t for t in self._targets.values()
                 if t.info.type == target_type and t.status == TargetStatus.ACTIVE]
 
+    def is_in_safe_zone(self, position: Tuple[float, float]) -> bool:
+        """
+        位置是否落在任一安全区内。
+
+        安全区里的目标 = 已经投放到位，**不应再被选为抓取目标**：
+        否则（配合"目标丢失后被删除又重新检测成新 id"）会跑去安全区重复扑空，
+        而导航的禁区设置又不允许车开进去 → 卡住。
+        """
+        if self._field is None or position is None:
+            return False
+        for elem in getattr(self._field, "elements", []):
+            if getattr(elem, "type", None) != FieldElementType.SAFE_ZONE:
+                continue
+            region = getattr(elem, "region", None)
+            if region is not None and region.contains(position[0], position[1]):
+                return True
+        return False
+
+    def _selectable(self, t: TrackedTarget) -> bool:
+        """可被抓取：状态 ACTIVE 且不在安全区内"""
+        if t.status != TargetStatus.ACTIVE:
+            return False
+        return not self.is_in_safe_zone(t.position)
+
     def get_regular_supplies(self) -> List[TrackedTarget]:
-        return self.get_targets_by_type(TargetType.REGULAR_SUPPLY)
+        return [t for t in self.get_targets_by_type(TargetType.REGULAR_SUPPLY)
+                if self._selectable(t)]
 
     def get_core_supplies(self) -> List[TrackedTarget]:
-        return self.get_targets_by_type(TargetType.CORE_SUPPLY)
+        return [t for t in self.get_targets_by_type(TargetType.CORE_SUPPLY)
+                if self._selectable(t)]
 
     def get_injured(self) -> List[TrackedTarget]:
-        return self.get_targets_by_type(TargetType.INJURED)
+        return [t for t in self.get_targets_by_type(TargetType.INJURED)
+                if self._selectable(t)]
 
     def get_dangerous(self) -> List[TrackedTarget]:
         return self.get_targets_by_type(TargetType.DANGEROUS)
@@ -244,12 +280,13 @@ class WorldMap:
                 matched_existing.add(best_match)
                 matched_new.add(new_idx)
 
-        # 步骤 3：创建新目标（未匹配的新检测 + 达到最小检测次数）
+        # 步骤 3：未匹配的新检测先入"待确认"缓冲，连续命中 MIN_SEEN_COUNT 次才建真目标。
+        # 旧实现是"直接创建"→ 单帧 HSV 误检立刻变成真目标，决策会跑去套一个不存在的东西。
+        self._age_pending()
         for new_idx, det in enumerate(detected_targets):
             if new_idx in matched_new:
                 continue
-            # 新检测，直接创建
-            self._create_new_target(det, timestamp)
+            self._offer_pending(det, timestamp)
 
         # 步骤 4：移除过时目标
         stale_ids = [
@@ -283,7 +320,58 @@ class WorldMap:
         target.seen_count += 1
         target.track_lost_count = 0
 
-    def _create_new_target(self, det: DetectedTarget, timestamp: float) -> int:
+    def _age_pending(self) -> None:
+        """待确认检测老化：超龄丢弃，避免缓冲无限增长。"""
+        alive = []
+        for p in self._pending:
+            p["age"] += 1
+            if p["age"] <= self.PENDING_MAX_AGE:
+                alive.append(p)
+        self._pending = alive
+
+    def _offer_pending(self, det: DetectedTarget, timestamp: float) -> None:
+        """
+        把"未匹配到已有目标"的检测并入待确认缓冲。
+
+        同一个候选连续被检测到 MIN_SEEN_COUNT 次才升级为真目标；
+        这样单帧 HSV 误检不会立刻变成可被决策选中的目标。
+        """
+        best = None
+        best_dist = self.ASSOCIATION_DISTANCE_MM
+        for p in self._pending:
+            if p["info"].type != det.info.type:
+                continue
+            d = self._distance(p["position"], det.position)
+            if d < best_dist:
+                best_dist = d
+                best = p
+
+        if best is None:
+            self._pending.append({
+                "info": det.info,
+                "position": det.position,
+                "hits": 1,
+                "age": 0,
+            })
+            return
+
+        # 命中同一候选：平滑位置 + 计数
+        best["hits"] += 1
+        best["age"] = 0
+        bx, by = best["position"]
+        best["position"] = (0.5 * bx + 0.5 * det.position[0],
+                            0.5 * by + 0.5 * det.position[1])
+        if best["hits"] >= self.MIN_SEEN_COUNT:
+            self._create_new_target(det, timestamp, position=best["position"])
+            self._pending.remove(best)
+
+    @property
+    def pending_count(self) -> int:
+        """当前待确认的候选数量（调试用）"""
+        return len(self._pending)
+
+    def _create_new_target(self, det: DetectedTarget, timestamp: float,
+                           position: Optional[Tuple[float, float]] = None) -> int:
         """创建新的跟踪目标"""
         target_id = self._next_id
         self._next_id += 1
@@ -291,11 +379,11 @@ class WorldMap:
         self._targets[target_id] = TrackedTarget(
             id=target_id,
             info=det.info,
-            position=det.position,
+            position=position if position is not None else det.position,
             confidence=det.confidence,
             first_seen=timestamp,
             last_seen=timestamp,
-            seen_count=1,
+            seen_count=self.MIN_SEEN_COUNT,   # 已通过连续确认
         )
         logger.debug(f"新目标: ID={target_id}, {det.info.description}, "
                       f"pos=({det.position[0]:.0f}, {det.position[1]:.0f})")

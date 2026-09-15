@@ -67,6 +67,10 @@ class PerceptionPipeline:
         self._opponent_tracker = OpponentTracker()
         self._sensor_fusion = SensorFusion()
 
+        # 最近一帧的原始检测结果（供"套取视觉确认"等使用，像素空间）
+        self._last_detections: List[Detection] = []
+        self._last_frame_size: Optional[Tuple[int, int]] = None
+
         # 统计
         self._frame_count = 0
         self._total_latency_ms = 0.0
@@ -83,6 +87,35 @@ class PerceptionPipeline:
     @property
     def opponent_tracker(self) -> OpponentTracker:
         return self._opponent_tracker
+
+    def check_sleeve_occupied(self, roi_norm=None,
+                              min_confidence: float = 0.25) -> bool:
+        """
+        判断 U 型槽内是否检测到目标（本车无硬件"套住检测"时的视觉替代）。
+
+        判据：检测框中心落在归一化 ROI 内即认为槽里有东西。
+        ROI 来自 ``config.Camera.SLEEVE_ROI``（归一化，需真机标定）。
+
+        Returns:
+            True  = 槽内检测到目标（视为已套住）
+            False = 槽内为空（视为没套住 → 上层抬爪后退重试）
+        """
+        from .. import config as _cfg
+        if roi_norm is None:
+            roi_norm = getattr(_cfg, "SLEEVE_ROI", None)
+        if not roi_norm or len(roi_norm) != 4:
+            return True                     # 未配置 ROI → 不做判断（按成功处理）
+        if not self._last_detections:
+            return False                    # 有帧但没有任何检测 → 槽内空
+        img_w, img_h = self._last_frame_size or (640, 480)
+        x1, y1, x2, y2 = roi_norm
+        px1, py1, px2, py2 = x1 * img_w, y1 * img_h, x2 * img_w, y2 * img_h
+        for det in self._last_detections:
+            cx, cy = det.center_pixel
+            if px1 <= cx <= px2 and py1 <= cy <= py2:
+                if det.confidence >= min_confidence:
+                    return True
+        return False
 
     @property
     def sensor_fusion(self) -> SensorFusion:
@@ -134,6 +167,14 @@ class PerceptionPipeline:
 
         # ─── 步骤 1：检测 ───
         detections: List[Detection] = self._detector.detect(frame)
+        # 保留原始检测（像素空间），供套取视觉确认等使用
+        self._last_detections = detections
+        if frame is not None:
+            try:
+                _h, _w = frame.shape[:2]
+                self._last_frame_size = (int(_w), int(_h))
+            except Exception:
+                pass
 
         # ─── 步骤 2：分类 ───
         detected_targets: List[DetectedTarget] = self._classifier.classify_batch(
