@@ -7,7 +7,8 @@
 - 口径：凡能靠读代码判定的，给**确定结论**；每条不符合项都回答「比赛时丢什么分 / 卡在哪一步」。
 - 纪律：只报有证据的问题；无证据的标「无法判定」并说明缺什么。
 - **审计基线**：本次结论基于 `git show 0e8a5ae` 的工作树快照。审计期间修复者已并发改动 3 个文件（`navigation/forbidden_zones.py`、`navigation/navigation_pipeline.py`、`transport/load_manager.py`），因此这些文件的行号以基线为准；核对差异用
-  `git diff 0e8a5ae -- <文件>`。其中 `load_manager.can_load_batch` 已被改为"与顺序无关"的判定（修复了 `[伤员, 普通]` 顺序被放行的缺陷），B3 中引用的 `can_load_batch` 行号需按改动后代码重定位。
+  `git diff 0e8a5ae -- <文件>`。其中 `load_manager.can_load_batch` 已被改为"与顺序无关"的判定（修复了 `[伤员, 普通]` 顺序被放行的缺陷），B3 中引用的 `can_load_batch` 行号需按改动后代码重定位；B3/§7 引用的 `load_manager.py:283 penalty = 10 * len(released)` 在队长复核时仍存在。
+- **章节地图**：一、逐条对照表｜二、不符合项清单（B1~B24）｜三、需人确认｜四、当前软件达成度判断（含风险 Top3 与修复顺序）｜**五、软件负责人视角：赛项要求对软件的硬约束（6 条）**｜**六、「写了但没用」配置清单（现场改参数不生效，B24）**｜**七、待现场公布项（运行时长 / 投放扣分细则）**
 
 ---
 
@@ -50,6 +51,8 @@
 ---
 
 ## 二、不符合项清单（按严重度）
+
+> 共 **24 条**：blocker 4（B1~B4）／high 5（B5~B9）／medium 7（B10~B15、B24）／low 8（B16~B23）。
 
 > 每条格式：**问题 / 证据 / 影响（丢什么分·卡在哪一步）/ 建议修法**
 
@@ -256,6 +259,36 @@
 - **影响**：现场抽签结果必须人工敲环境变量；写错 = 全部运到对方区（严重违规）。
 - **修法**：把 `field_detector` 接进 `PerceptionPipeline`，用"本车所在安全区颜色"自检 `TEAM_COLOR` 是否与实际一致，不一致时拒绝一键启动（在 `DebugState` 里拦截）。
 
+#### B24. 「现场可改参数」链路未接通：YAML 字段写了但没有任何代码读取（现场改不生效，必须改代码）
+
+- **问题**：赛项要求决赛创新实践环节能在现场**编程/装配/调试**，因此关键参数必须"改配置即生效、不重编译"。仓库里 `config/robot.default.yaml` + `config/field.default.yaml` 已经写了几乎所有该有的字段，但 `apply_robot_config()` **只接通了 `timing` 与 `thresholds` 两组**，其余字段**全项目 0 消费点**；真正驱动行为的是散落在各模块里的硬编码常量。更严重的是 `config/field.default.yaml` **整个文件 0 消费点**（`grep -rn "FieldConfig" src/rescue_robot` 除 `config_loader.py`/`__init__.py` 外无命中），场地几何实际来自 `field_elements.py` 的硬编码 `StandardFieldLayout`。
+- **证据**：
+  - `src/rescue_robot/config.py:126-148` —— `apply_robot_config` 的函数体只到 `Thresholds.CAMERA_MIN_FPS` 为止，`motors`/`strategy_weights`/`match`/`fallback`/`perception`/`communication`/`logging` 段落**一行都没引用**
+  - `src/rescue_robot/main.py:102-109` —— 只 `RobotConfig.from_yaml(...)` + `apply_robot_config(...)`；**未调用** `ConfigLoader.merge_with_env(prefix="RESCUE_")`（该函数存在于 `innovation/config_loader.py:181-193`）→ 环境变量覆盖链路也不通
+  - 硬编码替代物（真正生效的值）：
+    ```python
+    # decision/decision_engine.py:98-104
+    MATCH_DURATION_S = 180.0 ; TIME_PRESSURE_S = 30.0
+    NAV_TIMEOUT_S = 10.0 ; GRIP_TIMEOUT_S = 3.0 ; TRANSPORT_TIMEOUT_S = 15.0
+    # decision/target_selector.py:59
+    TIME_PRESSURE_S = 30.0        # ← 与上处重复，改一处不生效
+    # transport/load_manager.py:283
+    penalty = 10 * len(released)  # ← 投放扣分硬编码，PDF 未给依据
+    # states/autonomous_state.py:51-53
+    WATCHDOG_EXPLORE_S = 10.0 ; WATCHDOG_SURVIVAL_S = 13.0 ; WATCHDOG_HARD_LIMIT_S = 15.0
+    # transport/transport_pipeline.py:106
+    self._push_dist_mm = 100.0    # 推入斜坡距离，注释写"真机标定"却不可配置
+    ```
+  - 逐字段清单见本报告 **§六「写了但没用」配置清单**
+- **影响（丢什么分/卡在哪一步）**：① 创新实践环节现场**改这几个值不生效**，必须改源码（甚至重编译/重启），既耽误调试时间也可能被扣该环节分；② 更致命的是**它把一个已知错误锁死了**——`config/field.default.yaml` 里 `safe_zones.red.y: 2670`（应为 2700）和 `speed_bumps.width_mm: 30 / height_mm: 5`（图 9 实测 60×10）**都是错的**，现场想临时纠正也没有入口；③ 用户已确认"运行时长""投放扣分细则"PDF 未给数值，却正好落在未接线的字段上 → 现场公布后**无法快速适配**（见 §七）。
+- **建议修法**（见 §6.3 详版）：
+  1. `config.apply_robot_config()` 增补写回：`match.duration_s/time_pressure_s/*_timeout_s` → 模块级可变常量（`decision_engine` 改为读 config，去掉类属性硬编码）；`fallback.*` → `AutonomousState.WATCHDOG_*`；`strategy_weights.*` → `TargetSelector` 的评分权重参数；
+  2. `perception.target_color_map` → 由它生成 `PRELIMINARY_TARGETS/FINAL_TARGETS`（默认值不变），一举解决 B13；
+  3. `transport_pipeline._push_dist_mm`/`_place_steps`、`load_manager` 扣分、目标分值 → 分别做成可配置参数；
+  4. `FieldLayout.standard()` 改走 `FieldConfig.from_yaml("config/field.default.yaml")`，**并先按 B2 修正 YAML 内的 safe_zones.y 与 speed_bumps 尺寸**（否则接线即放大错误）；
+  5. `main.py:105` 改用 `ConfigLoader.merge_with_env(prefix="RESCUE_")`，支持环境变量现场覆盖；
+  6. 验收：改 YAML 后打印 `DecisionEngine.time_remaining_s` 初值、目标颜色表、安全区 y，与 YAML 一致即通过（**不修改任何 .py**）。
+
 ### 🟢 low
 
 | 编号 | 问题 | 证据 | 影响 | 建议修法 |
@@ -310,6 +343,145 @@
 3. B5 → B6 → B13（识别链）
 4. B9 → C8/B12（异常与对抗兜底）
 5. 其余 medium/low
+
+---
+
+## 五、软件负责人视角：赛项要求对软件的硬约束
+
+> 本节把要求里**直接约束软件**的条款单独抽出，逐条给「要求原文关键句 → 代码现状（文件:行）→ 判定 → 后果」。
+
+### 5.1 决赛创新实践环节：现场编程 / 改参数 / 调试 → 必须"不重编译就能改"
+
+- **要求原文关键句**：「在规定时间内，按照决赛现场发布的决赛命题将自带的零部件更换在参赛作品上，并完成该环节的**编程、装配、调试**等任务」；初赛任务命题文档要求「策划决赛场景和规划决赛场地…保证在创新实践环节中必须进行救援机器人相关零部件的设计及制造」。
+- **代码现状**：配置链路**存在但只接通了 1/4**。
+  - `main.py:102-109`：`RobotConfig.from_yaml("config/robot.default.yaml")` → `config.apply_robot_config(robot_cfg)`
+  - `config.py:126-148`：`apply_robot_config` **只写回 `Timing.*`（8 项）与 `Thresholds.*`（5 项）**，其余段（`motors`/`strategy_weights`/`match`/`fallback`/`perception`/`communication`/`logging`）**一个都没用**
+  - `innovation/config_loader.py:181-193` 提供了 `merge_with_env(prefix="RESCUE_")`，**`main.py` 从不调用** → 环境变量覆盖链路实际不通
+- **判定**：**不符合**（对应新增不符合项 **B24**）
+- **后果**：创新实践环节现场改这几个值**不会生效**，必须改源码 → 该环节扣分 + 白白耗掉调试时间（调试总时长是硬限制）。
+
+### 5.2 一键启动 + "规定启动时间内必须离开出发区"
+
+- **要求原文关键句**：「调试时间结束，现场裁判发出统一开始指令，参赛队**一键启动**救援机器人，计时开始，各参赛队救援机器人在**规定启动时间内必须离开出发区**，否则本轮比赛结束」。
+- **代码现状（延迟链，全部可查）**：
+  | 环节 | 位置 | 时长 |
+  |---|---|---|
+  | 长按判定 | `config.py:45` `BUTTON_LONG_PRESS_MS=500` | 500ms（**需人确认**裁判是否接受长按） |
+  | 自检（BOOT→DEBUG） | `states/boot_state.py:44-56` → `system_check.py:225-238` | 每传感器 `SENSOR_CHECK_TIMEOUT_MS=3000`、每电机 `MOTOR_CHECK_DURATION_MS=500`、整机 `SELF_CHECK_TIMEOUT_S=10`（`config.py:48-51`） |
+  | 摄像头首帧预热（建管线时，阻塞） | `main.py:150-164` `CAM_WARMUP_S=3.0` | 最多 3s |
+  | 按下一键启动后的固定延迟 | `states/autonomous_state.py:162-164` `time.sleep(POST_START_DELAY_MS=1000)` | 固定 1000ms |
+  | 起步 | 主循环 50Hz + 导航首帧 | ~数十 ms |
+- **判定**：**部分不符合**——延迟链**可控但未被约束**：单传感器超时 3s × 多路传感器串行 + 电机 0.5s × 2 + 摄像头 3s，**极端情况自检可吃掉十几秒**，再加上固定 1s 延迟，与"规定启动时间内离开出发区"存在冲突风险；且 `POST_START_DELAY_MS` 原本是"等裁判离开"用，**没有与出发区离开判定联动**。
+- **后果**：若现场"启动时间"较短，可能**还没动就被判本轮结束（0 分）**。
+- **建议修法**：① 把自检做成**并行/可裁剪**（`SystemChecker.run` 里非关键项设为非阻塞，`system_check.py:225-238`）；② `POST_START_DELAY_MS` 从 1000 降到 ≤300 并与"是否已离开出发区"解耦（`autonomous_state.py:162-164`）；③ 起步优先走"低速直行 300~500mm 离区"再进入正常导航（新增 `AutonomousState` 起步动作，用 `field_elements` 的 `SPEED_BUMP`/出发区区域判离区完成）。
+
+### 5.3 全自主、不可遥控
+
+- **要求原文关键句**：「救援机器人必须采用**自主运行模式**…允许与笔记本电脑进行通讯，**运行过程中不能触碰笔记本电脑**，**不能用其他任何方式对救援机器人进行遥控**」。
+- **代码现状**：
+  - `states/autonomous_state.py:137-147`：进入即 `_lock_external_inputs()`；`:364-375` 只记日志
+  - `state_machine.py:184-203`：`one_key_start()` 置 `_external_inputs_locked=True`，且 `AUTONOMOUS → DEBUG` 被显式禁止（`:129-131`）
+  - `communication/comm_manager.py:140-144`：`is_locked` 时拦截所有入站指令并计数（自测 `:273-281` 验证拦截生效）
+- **判定**：**符合（软件层）**。唯一未逐行核验点：`communication/comm_server.py`（WebSocket 服务端）在 AUTONOMOUS 期间是否仍接受**新连接**并存在绕过 `CommManager` 门禁的路径 → 标「**需复核**」，不影响结论（运动指令最终都经 `CommManager`/`chassis`）。
+- **后果**：若 `comm_server` 有旁路，会被判"遥控"→ 取消成绩；建议复核并把 `comm_server` 在锁定后改为**只发不收**。
+
+### 5.4 碰撞保护 / 失控保护
+
+- **要求原文关键句**：「应具备高速移动、避障、越障、救援目标的搜索与转运、对象的识别和信息获取（二维码、条码、文字、图像、形状、颜色、温度、振动等），**并具有碰撞保护、失控保护等功能**」。
+- **代码现状**：
+  - `decision/anomaly_handler.py:34` 定义 `COLLISION_STUCK`（接触 >10s），`decision/opponent_strategy.py:284-299` 实现 7s 预警 / 9s 强制脱离 —— **两者都未被 `DecisionEngine` 实例化或调用**（`opponent_strategy` 全仓 0 引用；`grep` 命中的 `robustness/*`、`innovation/hot_reloader` 也只在 `__init__.py` 的名字导出与 `deploy.py` 的模块字符串里，**无运行时调用点**）
+  - `decision/decision_engine.py:184, 208-211`：`contact_duration_s: float = 0.0` 是**入参默认值**，`states/autonomous_state.py:260-265` 调用时**不传** → 接触时长恒为 0，`anomaly_handler.check(..., contact_duration_s)` 永远看不到接触
+  - 上位机看门狗**刻意不停车**：`states/autonomous_state.py:50-53, 343-362`（15s 仍"保命绕圈"）；`decision_engine.py:422-440` 把 `EMERGENCY_STOP` **降级**为绕圈
+- **判定**：**不符合**（上位机侧未实现）。现有保护只有下位机速度看门狗（`chassis_serial_protocol.md`：300ms 保持 / 800ms 停）。
+- **后果**：① 发生接触时软件不知道在接触 → 不会主动脱离，**白丢时间**；② 被裁判强制分离放回出发区后**没有任何重置位姿/继续运行的接口调用**（`handle_forced_separation` 无人调用）→ 定位仍是旧位姿，**放回后动作全错，该轮基本报废**；③ 功能要求项在资格审查时可能被质疑。
+- **建议修法**：`DecisionEngine.__init__` 里实例化 `OpponentStrategy`；`AutonomousState._run_once` 把 `contact_duration_s`（来自 `OpponentTracker`/下位机）传进 `decision.update()`；把 `handle_forced_separation(new_pose)` 接到"触发分离"事件并同时调用 `chassis.set_start_pose()` + `localizer.set_pose()`。
+
+### 5.5 识别能力（含初赛/决赛形状参数）
+
+- **要求原文关键句**：「对象的识别和信息获取（**二维码、条码、文字、图像、形状、颜色、温度、振动**等）」。
+- **代码现状**：
+  - **已实现**：颜色（`perception/detection.py:34-51` HSV 阈值表）+ 形状（`:54-73` 顶点数/面积比 + `:270-301` `_classify_shape`）
+  - **未实现**：二维码、条码、文字、图像、温度、振动（`system_check.py:101` 只有"温度传感器存在性检查"接口，检测链未使用；全仓无二维码/条码/文字识别代码）
+  - **初赛/决赛形状参数已配置**：`detection.py:54-61` 覆盖 正方体(4-8)/三棱锥(3-5)/长方体(4-8)/圆柱(8-20)/圆锥台(8-20)/球(8-30)；面积比 `:64-73`
+- **判定**：**部分符合**。缺失项对本赛项**不直接丢分**（救援赛项不靠二维码下发任务，温度/振动只在原要求里作为"识别能力"举例），但已实现的两项**有硬伤**：
+  - `CUBE (4,8)` 与 `CUBOID (4,8)` 顶点区间完全重叠，`SHAPE_AREA_RATIOS` 里 CUBE `(0.5,1.0)` 覆盖 CUBOID 的默认 `(0.2,1.0)`，`_classify_shape`（`:285-301`）按 dict 顺序取第一个匹配 → **长方体（伤员，15 分）必被判成正方体**；
+  - `detection.py:37-40` 的 `BLUE ((95,80,60),(125,255,255))` 与 `LIGHT_BLUE ((85,50,110),(108,255,255))` 在 H 95~108、S 80~255 完全重叠，叠加 `classification.py:105-128` 的"同色兜底" → **蓝色目标可能被判成危险目标（浅蓝）并被永久排除**。
+- **后果**：伤员（最高分）漏检/错类，**每漏一个丢 15 分**；蓝色目标被当危险目标 → 永不转运。
+- **建议修法**：见 B5/B6（用长宽比区分 CUBE/CUBOID；删除同色兜底、收窄 LIGHT_BLUE 阈值）。
+
+### 5.6 不得损坏场地设施
+
+- **要求原文关键句**：「比赛过程中（含调试），救援机器人**不得损坏场地等赛场设施**，为了避免损坏比赛相关设施，裁判员有权终止比赛。**若出现场地等被破坏，取消比赛资格**」。
+- **代码现状**：
+  - **有保护**：硬禁区（对方安全区 + 场边 100mm 边距）写入代价地图并实时校验 —— `navigation/forbidden_zones.py:60-106`、`navigation/navigation_pipeline.py:80, 96, 264`
+  - **无保护**：放置动作是"底盘向斜坡方向前推 `_push_dist_mm=100.0` + 舵机 4 步渐进 0→70°"（`transport/transport_pipeline.py:373-401`），**没有任何力/电流/堵转/位移上限或超时保护**；`Thresholds.MOTOR_MAX_CURRENT_MA`（`config.py:63`）只在自检阶段使用，运行中不做堵转判定
+  - 场地内障碍物（减速带）也未见"撞到就停"的判定（`near_speed_bump` 未接线，见 B12）
+- **判定**：**部分不符合**。路径规划层不会主动撞设施，但**一旦顶到紫色斜坡/围栏/减速带就是持续堵转推挤**，没有任何软件级熔断。
+- **后果**：**最严重等级——一旦被判定"破坏场地"直接取消比赛资格**（不只是丢分）。
+- **建议修法**：① 给 `TransportPipeline.PLACING` 加**超时 + 位移增量双重熔断**（推入 ≤2s 或位移 <5mm 即中止并抬爪）；② 把 `MOTOR_MAX_CURRENT_MA`/下位机电流遥测接进运行期堵转检测，超阈值立即 `chassis.send_stop()`；③ 把 `near_speed_bump`（`navigation_pipeline.py:141,167`）接上并按 `motion_control.BUMP_CROSS_TIME_S` 限速通过。
+
+---
+
+## 六、「写了但没用」配置清单（YAML 字段存在 → 行为不生效）
+
+> 来源：`config/robot.default.yaml`、`config/field.default.yaml`；判定方法＝字段是否被 `config.apply_robot_config`（`config.py:126-148`）写回，或在 `config_loader.py` 之外的运行代码里被消费。
+> **结论：现场改这些字段完全不会改变机器人行为。**
+
+### 6.1 `config/robot.default.yaml`
+
+| YAML 字段 | 代码里有谁读 | 真正生效的是什么 | 判定 |
+|---|---|---|---|
+| `robot.match.duration_s: 180` | 无人读（`grep` 全项目 0 消费点） | `decision/decision_engine.py:98 MATCH_DURATION_S = 180.0`（硬编码） | **写了但没用** |
+| `robot.match.time_pressure_s: 30` | 无人读 | `decision_engine.py:99 TIME_PRESSURE_S = 30.0`、`target_selector.py:59 TIME_PRESSURE_S = 30.0`（两处硬编码，需同步改） | **写了但没用** |
+| `robot.match.nav_timeout_s: 10` | 无人读 | `decision_engine.py:102 NAV_TIMEOUT_S = 10.0`（且**该常量本身也未使用**，见 B19） | **写了但没用** |
+| `robot.match.grip_timeout_s: 3` | 无人读 | `decision_engine.py:103 GRIP_TIMEOUT_S = 3.0`（同样未使用） | **写了但没用** |
+| `robot.match.transport_timeout_s: 15` | 无人读 | `decision_engine.py:104 TRANSPORT_TIMEOUT_S = 15.0`（同样未使用） | **写了但没用** |
+| `robot.fallback.max_retries: 3` | 无人读 | `decision_engine.py:133 self._max_retries = 3`（且未使用） | **写了但没用** |
+| `robot.fallback.watchdog_warn_s: 10` | 无人读 | `states/autonomous_state.py:51 WATCHDOG_EXPLORE_S = 10.0` | **写了但没用** |
+| `robot.fallback.watchdog_critical_s: 13` | 无人读 | `autonomous_state.py:52 WATCHDOG_SURVIVAL_S = 13.0` | **写了但没用** |
+| `robot.fallback.watchdog_timeout_s: 15` | 无人读 | `autonomous_state.py:53 WATCHDOG_HARD_LIMIT_S = 15.0` | **写了但没用** |
+| `robot.fallback.stuck_time_s: 5` / `stuck_distance_mm: 30` | 无人读 | 无对应实现（卡死判定缺失） | **写了但没用** |
+| `robot.strategy_weights.distance_weight / points_weight / time_weight` | 无人读 | `target_selector.py:88-102` 用硬编码公式（`MAX_FIELD_DISTANCE_MM`、`points ** 1.3`、`urgency*2.0`） | **写了但没用** |
+| `robot.strategy_weights.opponent_factor: 0.5` | 无人读 | `target_selector.py:98 opponent_factor = 0.5 if ... else 1.0`（硬编码） | **写了但没用** |
+| `robot.motors.max_speed_mm_s: 850` / `max_angular_speed_rad_s` / `wheel_base_mm` / `pid.*` / `pid_angle.*` | 无人读 | 速度上限在 `motion_control.py`（`MAX_LINEAR_SPEED` 等常量）；PID 在下位机固件 | **写了但没用** |
+| `perception.target_color_map.{regular,core,injured,dangerous}` | 无人读 | `perception/target_types.py:147-192, 199-244` 把颜色写死在目标表里 | **写了但没用**（直接导致 B13：决赛现场公布颜色时无法适配） |
+| `perception.detection.association_threshold_mm / stale_frames / remove_frames` | 无人读 | `perception/world_map.py` 里用自己的常量 | **写了但没用** |
+| `communication.*`、`logging.*` | 无人读（`robustness/logging_system.py` 全仓 0 运行时调用） | — | **写了但没用** |
+| `robot.timing.*`（8 项）、`robot.thresholds.*`（5 项） | ✅ `config.py:133-148` 写回 | 真正生效 | **已接线** |
+
+### 6.2 `config/field.default.yaml` —— 整文件 0 消费点（更严重的同一类问题）
+
+`grep -rn "FieldConfig" src/rescue_robot` 除 `config_loader.py` / `__init__.py` 外**无命中**；场地几何实际全部来自 `perception/field_elements.py` 的硬编码 `StandardFieldLayout`。后果是：
+
+| YAML 字段 | YAML 写的是 | 真正生效的是 | 差异 |
+|---|---|---|---|
+| `field.safe_zones.red.y: 2670`（`blue.y: 30`） | 2670 / 30 | `field_elements.py:184, 211` 同样 2670 / 30（**两边一致地错**） | 图 7 实测应为 **2700 / 0**（贴顶/贴底边）→ 见 B2 |
+| `field.safe_zones.*.supply_area` / `injured_area` | 300 宽子区（物资区 x1200~1500） | `field_elements.py:199-208` 实际切 290 + 隔板 20 + 290 | 与图 8 的"物资区≈300/伤员区≈280"不一致 |
+| `field.speed_bumps.width_mm: 30` / `height_mm: 5` | 30×5 | `field_elements.py:113-114` `SPEED_BUMP_DEPTH=60`（图 9 实测 60，图 9 高度 10） | **YAML 数值本身是错的**，若接线会把减速带改成 30×5 |
+| `field.start_zones.{red_left,blue_left...}` | 命名与 `field_elements` 的 1/2/3/4 编号无映射 | 代码侧 `start_positions`（`field_elements.py:163-167`） | 命名体系不统一，接线时必须先统一（见 B18） |
+| `field.opponent.contact_warning_s: 7 / contact_force_s: 9 / contact_limit_s: 10` | 7/9/10 | `opponent_strategy.py:88` 附近常量，但**该模块 0 引用** | 规则值对了，功能没接（见 5.4 / C8） |
+| `field.my_color: "red"` | red | `main.py:128-130` 读 **`TEAM_COLOR` 环境变量** | 两套入口不一致 |
+
+### 6.3 建议修法（配合 fixer 的 P1.5）
+
+1. **`config.py:126` `apply_robot_config`**：至少把 `match.*` 写回为模块级可变常量，并让 `DecisionEngine`/`TargetSelector` 从 `config` 读取（`MATCH_DURATION_S`/`TIME_PRESSURE_S`/`NAV_TIMEOUT_S`/`GRIP_TIMEOUT_S`/`TRANSPORT_TIMEOUT_S` → 改为 `@property` 读 config）；`fallback.*` 写回 `AutonomousState.WATCHDOG_*` 类属性。
+2. **目标颜色**：`target_types.py` 的 `PRELIMINARY_TARGETS/FINAL_TARGETS` 改为由 `perception.target_color_map` 生成（默认值保持与现状一致），这样决赛现场公布颜色后**改 YAML 即可**（同时解决 B13）。
+3. **场地几何**：`FieldLayout.standard()` 改为 `FieldLayout.from_config(FieldConfig.from_yaml("config/field.default.yaml"))`，并**先按 B2 修正 YAML 里的 safe_zones.y / speed_bumps 尺寸**（否则接线即放大错误）。
+4. **环境变量**：`main.py` 改用 `ConfigLoader.merge_with_env(prefix="RESCUE_")`（`config_loader.py:181-193`），让现场可在**不改文件**的情况下覆盖（对创新实践环节有利）。
+5. **验收方式**：改 YAML → 打印 `DecisionEngine.MATCH_DURATION_S` / `TargetSelector.TIME_PRESSURE_S` / 目标颜色表 / 安全区 y 与 `field.default.yaml` 一致，无需改任何 `.py`。
+
+---
+
+## 七、待现场公布项（软件侧须先做成可配置项）
+
+> 以下两项**赛项 PDF 未给出具体数值**（用户已确认，可能现场公布）。软件侧**不能靠猜**，正确做法是：**默认值保持不变，但必须走配置**，现场公布后改 YAML 即可生效。
+
+| 序号 | 待公布项 | PDF 出处与缺失情况 | 代码现状 | 软件侧应先做成 |
+|---|---|---|---|---|
+| **待定-1** | **规定运行时间（秒）** | 原文只有「规定运行时间到…比赛结束」「在规定运行时间内」（第 440 行附近），**未给出分钟/秒数**；`README.md` 自行假设"3 分钟" | 硬编码 `decision/decision_engine.py:98 MATCH_DURATION_S = 180.0`；YAML `robot.match.duration_s: 180` **写了不用**（见 §6.1）；`simulation/{sim_2d,integrated_sim}.py` 各自又硬编码 180 | ① `MatchConfig.duration_s` 真正驱动 `DecisionEngine`（含 `time_remaining_s`/TIME_PRESSURE 切换）；② 现场公布后只改 `config/robot.default.yaml`；③ `TIME_PRESSURE_S` 同理（`decision_engine.py:99` + `target_selector.py:59` **两处**都要接） |
+| **待定-2** | **投放位置错误的扣分细则** | PDF 只在初赛段写「转运至安全区的无效救援目标将被取出重新随机放置在场地中央」（第 436-437 行），**未给扣分数值**；第 19 页仅引用"评分规则"（该表不在本附件内） | 硬编码 `transport/load_manager.py:283 penalty = 10 * len(released)`；且 `:264-269` 随后又把该趟全部分值加回（见 B21），**扣分实际不生效** | ① 扣分规则做成配置（`scoring.wrong_zone_penalty_per_target`，默认 10，标注"假设值"）；② 修掉"先扣后全额加回"的矛盾：投错区域的目标**按 0 分计**再扣分；③ 目标分值与 `target_types.py:258-266` 的 5/10/15 同样移入配置（见 B11） |
+
+> 这两项在本报告的「逐条对照表」里对应 G3（评分规则无法判定）与 C10（运行时间），此处给出**可执行的软件侧动作**：**可配置 + 默认值不猜**。
 
 ---
 
