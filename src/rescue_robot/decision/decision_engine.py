@@ -138,6 +138,9 @@ class DecisionEngine:
         # 统计
         self._trips_completed = 0
         self._targets_delivered = 0
+        # 本队**已送达**的目标 id：用于识别"投放被判无效、目标被裁判重放场心"
+        # （不能拿"任意目标靠近场心"当判据，见 _check_invalid_transport）
+        self._delivered_ids: Set[int] = set()
         self._score = 0
 
         logger.info(f"DecisionEngine 初始化: my_color={my_color.name}")
@@ -345,6 +348,7 @@ class DecisionEngine:
             return Action(type=ActionType.WAIT, detail="首趟未套上，重做首趟")
 
         self._world_map.mark_in_safe_zone(self._current_target.id)
+        self._delivered_ids.add(self._current_target.id)
         self._targets_delivered += 1
         self._score += get_point_value(TargetType.REGULAR_SUPPLY)
 
@@ -358,17 +362,32 @@ class DecisionEngine:
     # ---- FREE_RUN / TIME_PRESSURE ----
 
     def _check_invalid_transport(self, rx: float, ry: float) -> bool:
-        """检测转运无效恢复：目标被裁判重新放在场地中央"""
+        """检测"本队刚投放的目标被裁判判为无效、重新放回场地中央"。
+
+        ⚠️ 旧实现：遍历**所有** ACTIVE 目标，只要有任意一个距场心 <500mm 就返回 True。
+        现场目标多（决赛 25 个）且规则明确"无效目标由裁判取出重放场地中央"，所以
+        场心附近有目标是常态 → 该判据常态误触发。误触发的后果不是"重选得分目标"
+        这么轻：调用点会把 `_current_target` 清空并**在运送途中**改发 NAVIGATE_TO，
+        把导航目标从安全区抢到下一个目标 → 那一趟永远到不了投放点（车一直在动，
+        也不会被卡死看门狗发现）→ 整场再也开不出新趟、一个都送不到。
+        现在只认**"我们已经送达过、却又变回 ACTIVE 且出现在场心"的目标**，
+        这才是规则里"无效投放被取出重放"的真实特征，且不会因无关目标误触发。
+        """
         import math
-        for tid, t in self._world_map.targets.items():
-            from rescue_robot.perception.target_types import TargetStatus
-            if t.status == TargetStatus.ACTIVE:
-                dist_to_center = math.sqrt(
-                    (t.position[0] - 1500)**2 + (t.position[1] - 1500)**2
-                )
-                if dist_to_center < 500:
-                    logger.info("检测到目标在场地中央(无效转运恢复): ID=%d", tid)
-                    return True
+        from rescue_robot.perception.target_types import TargetStatus
+        if not self._delivered_ids:
+            return False
+        for tid in self._delivered_ids:
+            t = self._world_map.targets.get(tid)
+            if t is None or t.status != TargetStatus.ACTIVE:
+                continue
+            dist_to_center = math.sqrt(
+                (t.position[0] - 1500) ** 2 + (t.position[1] - 1500) ** 2)
+            if dist_to_center < 500:
+                logger.warning(
+                    f"本次投放被判无效：目标#{tid}已回到场心附近"
+                    f"(距场心 {dist_to_center:.0f}mm) → 重新选择目标")
+                return True
         return False
 
     def _handle_free_run(self, rx: float, ry: float,
@@ -377,7 +396,9 @@ class DecisionEngine:
                          delivered_ids: Optional[List[int]] = None) -> Action:
         """处理自由转运状态"""
         # 检测转运无效恢复
-        if self._check_invalid_transport(rx, ry):
+        # ⚠️ 只有**手上没有货**时才允许因为"目标无效"而重选：运送途中改导航目标
+        #    会让本趟永远送不到（见 _check_invalid_transport 的说明）。
+        if not grip_done and self._check_invalid_transport(rx, ry):
             self._current_target = None  # 重新选择目标
 
         # 选择目标（伤员单独转运；普通+核心可混合 ≤3）
@@ -448,6 +469,7 @@ class DecisionEngine:
                     f"不标记入安全区，留待下一趟重新选择")
                 continue
             self._world_map.mark_in_safe_zone(t.id)
+            self._delivered_ids.add(t.id)   # 供"投放被判无效"检测（见 _check_invalid_transport）
             self._targets_delivered += 1
             self._score += get_point_value(t.info.type)
         self._trips_completed += 1
