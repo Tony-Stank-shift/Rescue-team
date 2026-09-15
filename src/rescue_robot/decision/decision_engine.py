@@ -124,6 +124,7 @@ class DecisionEngine:
 
         # 当前目标
         self._current_target: Optional[TrackedTarget] = None
+        self._pose: Tuple[float, float, float] = (150.0, 150.0, 0.0)  # 本帧位姿（保命/探索用）
         self._trip_targets: List[TrackedTarget] = []  # 本趟转运的所有目标（普通+核心可混合 ≤3）
         self._transporting = False
 
@@ -182,7 +183,10 @@ class DecisionEngine:
                release_done: bool = False,
                imu_data: Optional[dict] = None,
                contact_duration_s: float = 0.0,
-               timestamp: Optional[float] = None) -> Action:
+               timestamp: Optional[float] = None,
+               velocity: Optional[Tuple[float, float]] = None,
+               release_valid: bool = False,
+               delivered_ids: Optional[List[int]] = None) -> Action:
         """
         单帧决策。
 
@@ -194,6 +198,16 @@ class DecisionEngine:
             imu_data: IMU 数据（用于异常检测）
             contact_duration_s: 对方接触时长
             timestamp: 时间戳
+            release_valid: 最近一次投放是否为**有效投放**（目标落点在正确的
+                物资区/伤员区围栏内侧）。首趟只有有效才允许进入 FREE_RUN。
+            velocity: 由里程计位姿差算出的**实际**速度 (vx, vy) mm/s。
+                None = 上游没有运动学信息（仿真/单测）→ 内置"无动作"检测不启用；
+                真机必须传，否则异常链形同虚设。
+            delivered_ids: 上一趟**真正**送达的目标 id（来自
+                `TransportPipeline.delivered_target_ids`）。本趟**计划**可能多于
+                套取机构的物理容量（本车 = 1），没套上的目标必须留在场上等下一趟，
+                绝不能标记成"已入安全区"（标了就永不重选 = 永久丢分）。
+                None = 上游没提供 → 按旧行为（视为本趟计划全部送达）。
 
         Returns:
             Action: 要执行的动作
@@ -202,19 +216,25 @@ class DecisionEngine:
             timestamp = time.time()
 
         self._match_elapsed = timestamp - self._match_start_time
+        self._pose = robot_pose
         rx, ry, rtheta = robot_pose
 
         # ─── 异常检测 ───
+        # ⚠️ 旧实现固定传字面量 (0, 0) 当速度 → 内置"15s 无动作/卡死"判定**永不触发**；
+        # 同时下面那句无条件 `notify_action()` 每帧刷新保活计时，把内置看门狗彻底架空。
+        # 现在：由上游传真实速度；只有显式传了 velocity 才启用内置无动作检测。
         anomaly = self._anomaly.check(
-            robot_pose, (0, 0),  # velocity from nav
+            robot_pose, velocity,
             imu_data, contact_duration_s,
         )
         if anomaly.type != AnomalyType.NONE:
             self._strategy_state = StrategyState.ANOMALY
-            return self._handle_anomaly(anomaly)
+            return self._handle_anomaly(anomaly, robot_pose)
 
-        # 通知有动作（正常运行时）
-        self._anomaly.notify_action()
+        # velocity 为 None（无运动学信息）时，保持"不启用内置无动作检测"的旧行为，
+        # 避免在拿不到速度反馈的场景里误判；真机路径由 check() 内部按 speed>10 自行刷新。
+        if velocity is None:
+            self._anomaly.notify_action()
 
         # ─── 时间管理 ───
         if self.is_time_pressure and \
@@ -235,10 +255,14 @@ class DecisionEngine:
 
         # ─── 状态机 ───
         if self._strategy_state == StrategyState.FIRST_TRIP:
-            return self._handle_first_trip(rx, ry, nav_arrived, grip_done, release_done)
+            return self._handle_first_trip(rx, ry, nav_arrived, grip_done,
+                                           release_done, release_valid,
+                                           delivered_ids)
         elif self._strategy_state in (StrategyState.FREE_RUN,
                                        StrategyState.TIME_PRESSURE):
-            return self._handle_free_run(rx, ry, nav_arrived, grip_done, release_done)
+            return self._handle_free_run(rx, ry, nav_arrived, grip_done,
+                                          release_done, release_valid,
+                                          delivered_ids)
         elif self._strategy_state == StrategyState.FORCED_RESET:
             return self._handle_forced_reset()
         elif self._strategy_state == StrategyState.DONE:
@@ -250,7 +274,8 @@ class DecisionEngine:
 
     def _handle_first_trip(self, rx: float, ry: float,
                            nav_arrived: bool, grip_done: bool,
-                           release_done: bool) -> Action:
+                           release_done: bool, release_valid: bool = False,
+                           delivered_ids: Optional[List[int]] = None) -> Action:
         """处理首次转运状态"""
         # 选择目标
         if self._current_target is None:
@@ -297,7 +322,28 @@ class DecisionEngine:
                 detail="FIRST_TRIP: 运送至物资区",
             )
 
-        # 投放完成 → 进入 FREE_RUN
+        # ── 首趟完成判定 ──
+        # 规则：出发后必须把**一个普通物资单独送到本队安全区物资区围栏内侧**，
+        # 之后才能转运其它目标；投歪/投在围栏外 = 首趟未完成，后续全部无效。
+        # 旧实现只看 release_done 就切 FREE_RUN（投歪也当成功 → 整轮作废）。
+        if not release_valid:
+            logger.error("❌ 首趟投放无效（未落在本队物资区围栏内侧）→ "
+                         "保持 FIRST_TRIP，重新选普通物资重做首趟")
+            self._current_target = None
+            self._trip_targets = []
+            self._trips_completed += 1
+            return Action(type=ActionType.WAIT, detail="首趟无效，重做首趟")
+
+        # S-40 兜底：首趟目标必须真的在车上（正常情况必然成立，防"假成功"）
+        if (delivered_ids is not None
+                and self._current_target.id not in delivered_ids):
+            logger.error(f"❌ 首趟目标#{self._current_target.id}实际未套上 → "
+                         "首趟不算完成，重做首趟")
+            self._current_target = None
+            self._trip_targets = []
+            self._trips_completed += 1
+            return Action(type=ActionType.WAIT, detail="首趟未套上，重做首趟")
+
         self._world_map.mark_in_safe_zone(self._current_target.id)
         self._targets_delivered += 1
         self._score += get_point_value(TargetType.REGULAR_SUPPLY)
@@ -306,7 +352,7 @@ class DecisionEngine:
         self._current_target = None
         self._trips_completed += 1
 
-        logger.info("✅ FIRST_TRIP 完成! 进入 FREE_RUN")
+        logger.info("✅ FIRST_TRIP 完成（已有效送达物资区围栏内侧）! 进入 FREE_RUN")
         return Action(type=ActionType.WAIT, detail="首次转运完成")
 
     # ---- FREE_RUN / TIME_PRESSURE ----
@@ -327,7 +373,8 @@ class DecisionEngine:
 
     def _handle_free_run(self, rx: float, ry: float,
                          nav_arrived: bool, grip_done: bool,
-                         release_done: bool) -> Action:
+                         release_done: bool, release_valid: bool = False,
+                         delivered_ids: Optional[List[int]] = None) -> Action:
         """处理自由转运状态"""
         # 检测转运无效恢复
         if self._check_invalid_transport(rx, ry):
@@ -383,7 +430,23 @@ class DecisionEngine:
             )
 
         # 投放完成（本趟可能包含多个目标）
+        if not release_valid:
+            # 无效投放：目标会被裁判取出重放场心，**不能**标记为已入安全区，
+            # 否则世界地图把它当"已运走"，永远不会再被选中 → 永久丢分。
+            logger.error("本趟投放无效（未落在正确区域内）→ 不计分、不标记入区，重选目标")
+            self._trips_completed += 1
+            self._current_target = None
+            self._trip_targets = []
+            return Action(type=ActionType.WAIT, detail="投放无效，重选目标")
+
         for t in self._trip_targets:
+            # S-40：只给**真正送达**的目标记账。本趟计划里没套上的（机构容量限制）
+            # 必须留在场上，否则被当成"已运走"→ 永不重选 → 永久丢分。
+            if delivered_ids is not None and t.id not in delivered_ids:
+                logger.warning(
+                    f"本趟计划含目标#{t.id}，但实际未套上（套取机构容量限制）→ "
+                    f"不标记入安全区，留待下一趟重新选择")
+                continue
             self._world_map.mark_in_safe_zone(t.id)
             self._targets_delivered += 1
             self._score += get_point_value(t.info.type)
@@ -419,22 +482,32 @@ class DecisionEngine:
 
     # ---- 异常处理 ----
 
-    def _handle_anomaly(self, report: AnomalyReport) -> Action:
-        """处理异常：不再直接停止，改为降级保活"""
+    def _handle_anomaly(self, report: AnomalyReport,
+                        robot_pose: Tuple[float, float, float] = (1500.0, 1500.0, 0.0)) -> Action:
+        """
+        处理异常：不再直接停止，改为**产生真实运动**的降级保活。
+
+        ⚠️ 旧实现里 ESCAPE_MANEUVER / DEGRADE_SENSORS 两个分支返回 `WAIT`
+        → 决策不再给出导航目标 → 导航没有目标就零速度 → 车**真的停住不动**，
+        而"无动作"又会再次触发异常，形成"异常→静止→更异常"的死循环
+        （真机表现：卡住直到时间耗尽）。现在一律返回 NAVIGATE_TO(可达点)。
+        """
         logger.error("处理异常: %s → %s", report.type.name, report.recovery_action.name)
 
         if report.type == AnomalyType.NO_ACTION_15S:
             self._fallback_level = FallbackLevel.SURVIVAL
-            pos = self._get_survival_target(1500, 1500)
-            logger.warning("15s异常 → 保命绕圈")
+            pos = self._get_survival_target()
+            logger.warning("15s无动作 → 保命绕圈（真实绕圈路径点）")
             return Action(type=ActionType.NAVIGATE_TO,
                           target_position=pos,
                           detail="保命: 绕圈移动")
 
         if report.recovery_action == RecoveryAction.EMERGENCY_STOP:
+            # 这里不再真的急停：赛项只在"进入对方安全区/损坏场地/超时"才结束；
+            # 上位机侧保留"降级为保命运动"，避免因误判直接放弃整轮。
             self._fallback_level = FallbackLevel.SURVIVAL
-            pos = self._get_survival_target(1500, 1500)
-            logger.warning("紧急停止 → 降级为保命绕圈")
+            pos = self._get_survival_target()
+            logger.warning("紧急停止请求 → 降级为保命绕圈（不放弃整轮）")
             return Action(type=ActionType.NAVIGATE_TO,
                           target_position=pos,
                           detail="保命: 紧急降级")
@@ -442,13 +515,19 @@ class DecisionEngine:
         if report.recovery_action == RecoveryAction.ESCAPE_MANEUVER:
             self._anomaly.start_escape()
             self._last_action_time = time.time()
-            return Action(type=ActionType.WAIT,
-                          detail="脱困中: %s" % report.detail)
+            # 脱困必须有真实运动：给一个探索点让导航驱动底盘，而不是干等
+            pos = self._get_explore_target(robot_pose[0], robot_pose[1])
+            logger.warning(f"脱困中: {report.detail} → 驶向 ({pos[0]:.0f}, {pos[1]:.0f})")
+            return Action(type=ActionType.NAVIGATE_TO,
+                          target_position=pos,
+                          detail="脱困: %s" % report.detail)
 
         if report.recovery_action == RecoveryAction.DEGRADE_SENSORS:
             self._fallback_level = FallbackLevel.EXPLORE
-            logger.warning("传感器降级 → 探索模式")
-            return Action(type=ActionType.WAIT,
+            logger.warning("传感器降级 → 探索模式（保持运动，避免被判无动作）")
+            pos = self._get_explore_target(robot_pose[0], robot_pose[1])
+            return Action(type=ActionType.NAVIGATE_TO,
+                          target_position=pos,
                           detail="传感器降级: %s" % report.detail)
 
         return Action(type=ActionType.WAIT, detail=str(report))
@@ -475,20 +554,50 @@ class DecisionEngine:
         return False
 
     def _get_explore_target(self, rx: float, ry: float) -> tuple:
-        """生成探索目标：场地中央 + 随机偏移"""
-        cx = 1500 + random.randint(-600, 600)
-        cy = 1500 + random.randint(-600, 600)
-        cx = max(200, min(2800, cx))
-        cy = max(200, min(2200, cy))
-        return (cx, cy)
+        """生成探索目标：场地中央 + 随机偏移（排除安全区内的点）。"""
+        for _ in range(6):
+            cx = 1500 + random.randint(-600, 600)
+            cy = 1500 + random.randint(-600, 600)
+            cx = max(200, min(2800, cx))
+            # 旧实现这里被二次 clamp 到 2200，导致 y>2200 一侧（1/2 号出发区那半场）
+            # 永远搜不到 —— 上安全区附近的目标要等很久才可能被发现。
+            cy = max(200, min(2800, cy))
+            if not self._is_in_any_safe_zone(cx, cy):
+                return (cx, cy)
+        return (1500.0, 1500.0)
 
-    def _get_survival_target(self, rx: float, ry: float) -> tuple:
-        """保命绕圈：以当前位置为中心的圆形路径点"""
-        radius = 500
-        angle = time.time() % (2 * 3.14159)
-        tx = rx + radius * 3.14159 * 0.001  # 微小移动
-        ty = ry + radius * 0.001
-        return (tx, ty)
+    def _is_in_any_safe_zone(self, x: float, y: float) -> bool:
+        """(x, y) 是否落在任一安全区内（世界地图持有场地布局）。"""
+        try:
+            return bool(self._world_map.is_in_safe_zone((x, y)))
+        except Exception:
+            return False
+
+    def _get_survival_target(self) -> Tuple[float, float]:
+        """
+        保命绕圈：以**机器人当前位置**为中心的圆形路径点。
+
+        ⚠️ 旧实现 `rx, ry` 形参被调用方传成常量 (1500, 1500)，
+        且半径乘了 0.001 → 返回点距当前位置只有 ~1.6mm，
+        导航判"已到达" → 零速度 → "保命绕圈"实际原地不动。
+
+        另外：靠边/靠角时点位会被场地边界钳制，可能只剩几十 mm（同样会立刻"到达"），
+        所以这里在多个角度里挑一个**确实够远**的点，保证绕圈真的在动。
+        """
+        rx, ry = self._pose[0], self._pose[1]
+        radius = 400.0
+        best: Tuple[float, float] = (rx, ry)
+        best_d = -1.0
+        for k in range(12):
+            angle = (time.time() + k * 0.5) % (2 * math.pi)
+            tx = max(200.0, min(2800.0, rx + radius * math.cos(angle)))
+            ty = max(200.0, min(2800.0, ry + radius * math.sin(angle)))
+            d = math.hypot(tx - rx, ty - ry)
+            if d > best_d:
+                best, best_d = (tx, ty), d
+            if d >= radius * 0.6:
+                return (tx, ty)
+        return best
 
     def _get_supply_area_position(self) -> Tuple[float, float]:
         """获取本队物资区中心位置（安全区分区 290 宽，隔板 20 居中）"""

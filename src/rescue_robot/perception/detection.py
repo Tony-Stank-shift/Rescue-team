@@ -34,10 +34,18 @@ HSV_RANGES: Dict[TargetColor, Tuple[Tuple[int, int, int], Tuple[int, int, int]]]
     TargetColor.RED:       ((0, 100, 100), (10, 255, 255)),   # 红色（含低 H 值）
     TargetColor.YELLOW:    ((22, 100, 100), (35, 255, 255)),   # 黄色
     TargetColor.GREEN:     ((40, 80, 60), (80, 255, 255)),     # 绿色
-    TargetColor.BLUE:      ((95, 80, 60), (125, 255, 255)),    # 蓝色
+    # 蓝色：提高饱和度下界（S≥120），把"淡淡的浅蓝"让给 LIGHT_BLUE。
+    # 旧范围 S≥80 与 LIGHT_BLUE 的 H95~108/S80~255 完全重叠，检测顺序又让 BLUE 先命中，
+    # 于是真实的浅蓝"危险目标"会被判成蓝色、蓝色救援目标被判成浅蓝(=危险目标) → 直接丢分。
+    TargetColor.BLUE:      ((95, 120, 40), (128, 255, 255)),   # 蓝色（饱和度高）
     TargetColor.ORANGE:    ((4, 205, 35), (24, 255, 255)),   # 橘色（H 4~24 认橙，S≥205 排红色，红 S≤201）
     TargetColor.BLACK:     ((0, 0, 0), (179, 255, 60)),        # 黑色（低 V）
-    TargetColor.LIGHT_BLUE:((85, 50, 110), (108, 255, 255)),   # 浅蓝（S 上限放宽到 255）
+    # 浅蓝（危险目标）：H 85~110 + 较高亮度。
+    # ⚠️ 与 BLUE 的 H 区间天然重叠，**只能靠检测顺序**（LIGHT_BLUE 先测）区分，
+    # 因此真正防误判的闸门放在分类器：_fuzzy_match 已禁止任何颜色容差命中
+    # DANGEROUS（见 classification.py），避免"蓝色救援目标被判成危险目标永不被搬"。
+    # 若决赛现场公布的"蓝/浅蓝"无法区分，需现场标定这两个范围（config/YAML 已留口）。
+    TargetColor.LIGHT_BLUE:((85, 20, 110), (110, 255, 255)),   # 浅蓝
     TargetColor.BROWN:     ((10, 100, 50), (25, 200, 150)),    # 棕色
     TargetColor.WHITE:     ((0, 0, 180), (179, 30, 255)),      # 白色（低 S）
 }
@@ -60,10 +68,20 @@ SHAPE_VERTEX_RANGES = {
     TargetShape.SPHERE:            (8, 30),   # 球体 → 8+ 个顶点
 }
 
+# 长宽比判据（max(w,h)/min(w,h)）——区分正方体与长方体的**主判据**。
+# 伤员是 80×40×40 的长方体，俯视长宽比≈2；正方体≈1。旧实现完全没用这个信息。
+SHAPE_ASPECT_RATIOS = {
+    TargetShape.CUBE:   (0.60, 1.45),
+    TargetShape.CUBOID: (1.45, 3.60),
+}
+
 # 轮廓面积比（contourArea / bboxArea）辅助区分
 SHAPE_AREA_RATIOS = {
-    # 正方体：轮廓面积 ≈ bbox 面积（俯视图是正方形）
-    TargetShape.CUBE: (0.5, 1.0),
+    # 正方体：收紧到 (0.75,1.0)——旧值 (0.5,1.0) 把长方体的取值区间也包住了，
+    # 加上 CUBE 在字典里排在 CUBOID 之前，导致所有方体都被判成 CUBE（伤员必误判）。
+    TargetShape.CUBE: (0.75, 1.0),
+    # 长方体（伤员）：显式给区间，不再落到默认 (0.2,1.0) 兜底
+    TargetShape.CUBOID: (0.45, 0.9),
     # 球体 / 圆形：轮廓面积 ≈ π/4 × bbox 面积 ≈ 0.785
     TargetShape.SPHERE: (0.6, 0.9),
     TargetShape.CYLINDER: (0.55, 0.95),
@@ -164,11 +182,20 @@ class CVDetector(AbstractDetector):
                      f"res={self._image_size}")
 
     def _get_colors_to_detect(self) -> List[TargetColor]:
-        """获取当前阶段需要检测的所有颜色"""
-        colors = set()
-        for color, shape in self._target_config:
-            colors.add(color)
-        return list(colors)
+        """
+        需要检测的颜色（顺序敏感）。
+
+        ⚠️ 顺序必须"特殊色在前"：LIGHT_BLUE（浅蓝=危险目标）要先于 BLUE。
+        旧实现按配置表顺序（BLUE 在前），配合重叠的 HSV 区间，会把浅蓝判成蓝、
+        把蓝判成浅蓝 → 前者导致危险目标被当救援目标去搬（违规），
+        后者导致真实救援目标被当危险目标永不被搬（丢分）。
+        """
+        colors = {c for c, _ in self._target_config}
+        # 特殊色优先：LIGHT_BLUE（浅蓝/危险）必须先于 BLUE 检测
+        priority = [TargetColor.LIGHT_BLUE, TargetColor.BLUE]
+        ordered = [c for c in priority if c in colors]
+        ordered += [c for c in colors if c not in priority]
+        return ordered
 
     def detect(self, frame) -> List[Detection]:
         """
@@ -274,6 +301,18 @@ class CVDetector(AbstractDetector):
 
         bbox_area = w * h
         area_ratio = area / bbox_area if bbox_area > 0 else 0
+
+        # ── 先用长宽比区分正方体 / 长方体（二者顶点区间相同，必须靠这个区分）──
+        ratio = (max(w, h) / min(w, h)) if min(w, h) > 0 else 1.0
+        cube_ok = (SHAPE_ASPECT_RATIOS[TargetShape.CUBE][0] <= ratio
+                   <= SHAPE_ASPECT_RATIOS[TargetShape.CUBE][1])
+        cuboid_ok = (SHAPE_ASPECT_RATIOS[TargetShape.CUBOID][0] <= ratio
+                     <= SHAPE_ASPECT_RATIOS[TargetShape.CUBOID][1])
+        if cube_ok != cuboid_ok:
+            guess = TargetShape.CUBE if cube_ok else TargetShape.CUBOID
+            v_min, v_max = SHAPE_VERTEX_RANGES[guess]
+            if v_min <= vertices <= v_max:
+                return guess
 
         # Hu 矩（形状描述子）
         moments = cv2.moments(contour)

@@ -4,8 +4,11 @@ config.py —— 全局配置常量
 所有可调参数集中管理，方便现场快速修改。
 """
 
+import logging
 from dataclasses import dataclass
 from enum import IntEnum
+
+logger = logging.getLogger("config")
 
 
 # ============================================================
@@ -62,6 +65,41 @@ class Thresholds:
     MOTOR_MIN_CURRENT_MA = 50       # 电机空载最小电流（待定）
     MOTOR_MAX_CURRENT_MA = 5000     # 电机堵转最大电流（待定，应高于正常行驶 3-4A）
     CAMERA_MIN_FPS = 10             # 摄像头最低帧率
+    # ❓ 该数值来源不明：赛项 PDF 只写"转运至安全区的无效救援目标将被取出重新
+    #    随机放置在场地中央"，**未给出扣分细则**。暂按 10 分/个；现场确认后
+    #    改 YAML `robot.placement.penalty_per_target` 即可（无需重编译）。
+    PLACEMENT_PENALTY_PER_TARGET = 10
+
+
+# ============================================================
+# 套取/投放机构几何（真机标定项，可由 YAML 覆盖）
+# ============================================================
+class Placement:
+    """
+    机构几何标定参数。
+
+    DROP_FORWARD_MM：释放瞬间，目标（在车头 U 型槽内）相对**车心**的前伸距离。
+      投放有效性判定必须用它把"车身位置"换算成"目标落点"：
+        drop_point = (x + L·cosθ, y + L·sinθ)
+      误差直接决定"有效/无效投放"，也就决定首趟成败。
+      ⚠️ 必须真机标定：把目标放进槽里量前伸距离，再改 YAML。
+    PUSH_DIST_MM：推式放置时朝斜坡方向的推入距离（同样需真机标定）。
+
+    SLEEVE_MAX_HOLD：一趟最多能**真正套住**几个目标 = 套取机构的物理容量。
+      默认 1：本车 U 型槽由单只 SG90 驱动，"套住(0°) / 释放(70°)"只有一个
+      自由度，且每次下压前都必须先抬爪（抬爪 = 释放）→ 先前套住的目标会被放掉。
+      因此"一趟带 3 个"在物理上不成立。**必须默认 1**，否则软件会把根本没带上
+      的目标也算作已送达（虚高得分；首趟"必须且仅送 1 个"还会假成功）。
+      ⚠️ 仅当机构组确认"槽内可同时容纳多个且行进中不脱落"时才可调大；
+         调大后必须先回归集成仿真（决策引擎 grip_done 耦合需同步调整）。
+    """
+    DROP_FORWARD_MM: float = 150.0
+    PUSH_DIST_MM: float = 100.0
+    SLEEVE_MAX_HOLD: int = 1
+
+
+placement = Placement()
+
 
 
 # ============================================================
@@ -146,3 +184,72 @@ def apply_robot_config(cfg) -> None:
     Thresholds.MOTOR_MIN_CURRENT_MA = th.motor_min_current_ma
     Thresholds.MOTOR_MAX_CURRENT_MA = th.motor_max_current_ma
     Thresholds.CAMERA_MIN_FPS = th.camera_min_fps
+
+    # ── 机构几何 / 扣分（现场标定项，YAML 改了立刻生效）──
+    pl = getattr(cfg, "placement", None)
+    if pl is not None:
+        Placement.DROP_FORWARD_MM = pl.drop_forward_mm
+        Placement.PUSH_DIST_MM = pl.push_dist_mm
+        # 机构容量：夹到 [1,3]（规则上限 3 个/趟）
+        # ⚠️ >1 目前**未接线完成**，必须挡掉：多目标逐个套取的机构侧已实现，但
+        #    决策引擎的 grip_done 契约仍假设"一趟只套 1 个"，容量 >1 时决策会在
+        #    套取途中下发 TRANSPORT_TO 把导航目标抢走 → 空耗时间（实测 180s 只送 4 个，
+        #    比容量 1 的 7 个还差）。宁可回退到唯一验证过的 1，也不让现场调到坑里。
+        try:
+            _hold = int(getattr(pl, "sleeve_max_hold", 1))
+        except (TypeError, ValueError):
+            _hold = 1
+        if _hold > 1:
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                f"placement.sleeve_max_hold={_hold} 暂不支持（需先改决策引擎 "
+                f"grip_done 耦合，见 docs/audit/FIXES.md 的 S-40）→ 强制回退 1")
+            _hold = 1
+        Placement.SLEEVE_MAX_HOLD = max(1, min(3, _hold))
+        Thresholds.PLACEMENT_PENALTY_PER_TARGET = pl.penalty_per_target
+
+    # ── 比赛参数 / 超时 / 降级阈值：真正驱动行为（原来只写死在代码常量里）──
+    # 延迟导入避免 config ←→ decision/navigation 的循环 import。
+    m = getattr(cfg, "match", None)
+    if m is not None:
+        from .decision.decision_engine import DecisionEngine
+        DecisionEngine.MATCH_DURATION_S = float(m.duration_s)
+        DecisionEngine.TIME_PRESSURE_S = float(m.time_pressure_s)
+        DecisionEngine.NAV_TIMEOUT_S = float(m.nav_timeout_s)
+        DecisionEngine.GRIP_TIMEOUT_S = float(m.grip_timeout_s)
+        DecisionEngine.TRANSPORT_TIMEOUT_S = float(m.transport_timeout_s)
+        # 时间紧迫阈值同时约束目标选择器
+        from .decision.target_selector import TargetSelector
+        TargetSelector.TIME_PRESSURE_S = float(m.time_pressure_s)
+
+    fb = getattr(cfg, "fallback", None)
+    if fb is not None:
+        from .decision.anomaly_handler import AnomalyHandler
+        AnomalyHandler.WATCHDOG_WARN_S = float(fb.watchdog_warn_s)
+        AnomalyHandler.WATCHDOG_CRITICAL_S = float(fb.watchdog_critical_s)
+        AnomalyHandler.WATCHDOG_TIMEOUT_S = float(fb.watchdog_timeout_s)
+        AnomalyHandler.STUCK_TIME_S = float(fb.stuck_time_s)
+        AnomalyHandler.STUCK_DISTANCE_MM = float(fb.stuck_distance_mm)
+        from .states.autonomous_state import AutonomousState
+        AutonomousState.WATCHDOG_EXPLORE_S = float(fb.watchdog_warn_s)
+        AutonomousState.WATCHDOG_SURVIVAL_S = float(fb.watchdog_critical_s)
+        AutonomousState.WATCHDOG_HARD_LIMIT_S = float(fb.watchdog_timeout_s)
+
+    # ── 电机 PID / 限速：接到运动控制器（原来 YAML 里写了也不生效）──
+    mot = getattr(cfg, "motors", None)
+    if mot is not None:
+        from .navigation.motion_control import MotionController
+        MotionController.PID_DISTANCE = (mot.pid.kp, mot.pid.ki, mot.pid.kd)
+        MotionController.PID_ANGLE = (mot.pid_angle.kp, mot.pid_angle.ki,
+                                      mot.pid_angle.kd)
+        MotionController.DEFAULT_MAX_LINEAR_SPEED = float(mot.max_speed_mm_s)
+        MotionController.DEFAULT_MAX_ANGULAR_SPEED = float(mot.max_angular_speed_rad_s)
+        MotionController.DEFAULT_WHEEL_BASE_MM = float(mot.wheel_base_mm)
+
+    logger.info(
+        "已应用 YAML 配置: match.duration=%ss, time_pressure=%ss, "
+        "watchdog=%s/%ss, placement.drop_forward=%smm, penalty=%s分/个",
+        DecisionEngine.MATCH_DURATION_S, DecisionEngine.TIME_PRESSURE_S,
+        AnomalyHandler.WATCHDOG_WARN_S, AnomalyHandler.WATCHDOG_TIMEOUT_S,
+        Placement.DROP_FORWARD_MM, Thresholds.PLACEMENT_PENALTY_PER_TARGET,
+    )

@@ -156,6 +156,7 @@ class IntegratedSim:
         self._trajectory = []
         self._trip_gripped = False
         self._trip_released = False
+        self._trip_released_valid = False
         self._prev_current_id = None
         self._last_action = None
 
@@ -263,6 +264,7 @@ class IntegratedSim:
         if cur_id is not None and cur_id != self._prev_current_id:
             self._trip_gripped = False
             self._trip_released = False
+            self._trip_released_valid = False
         self._prev_current_id = cur_id
 
         nav_arrived = self.nav.is_arrived()
@@ -281,6 +283,8 @@ class IntegratedSim:
                 grip_done=grip_done,
                 release_done=release_done,
                 timestamp=ts,
+                release_valid=self._trip_released_valid,
+                delivered_ids=self.transport.delivered_target_ids,
             )
         except Exception as e:  # 决策异常不打断仿真，记录后继续
             self._events.append(f"DECISION_ERROR: {e}")
@@ -337,6 +341,7 @@ class IntegratedSim:
 
         # ── 8. 投放联动：套取的目标落到机器人当前位置 ──
         if self.transport.is_complete():
+            valids = []
             for t in self.targets:
                 if t.carried:
                     t.carried = False
@@ -349,6 +354,9 @@ class IntegratedSim:
                     )
                     # 本趟投放完成，置位"已投放"，决策引擎据此 mark_in_safe_zone
                     self._trip_released = True
+                    valids.append(res.is_valid)
+            if valids:
+                self._trip_released_valid = all(valids)
 
         # ── 9. 时间推进 / 轨迹 / 结束判定 ──
         self._time_elapsed += dt

@@ -30,7 +30,7 @@ from .states.debug_state import DebugState
 from .states.autonomous_state import AutonomousState
 from .hardware.button import MockButton, GPIOButton
 from .hardware.indicator import MockIndicator, LEDIndicator
-from .perception.field_elements import FieldLayout, SafeZoneColor
+from .perception.field_elements import FieldLayout, SafeZoneColor, StandardFieldLayout
 from .perception.perception_pipeline import PerceptionPipeline
 from .navigation.navigation_pipeline import NavigationPipeline
 from .decision.decision_engine import DecisionEngine
@@ -128,6 +128,17 @@ def main():
         my_color = (SafeZoneColor.RED
                     if os.environ.get("TEAM_COLOR", "red").lower() == "red"
                     else SafeZoneColor.BLUE)
+        # 抽签得到的出发区（1~4，默认 3）；决定全场坐标系原点与朝向
+        try:
+            start_zone = int(os.environ.get("START_ZONE", "3"))
+        except ValueError:
+            logger.warning("START_ZONE 不是数字，回退 3 号出发区")
+            start_zone = 3
+        if not 1 <= start_zone <= 4:
+            logger.warning(f"START_ZONE={start_zone} 非法（应为 1~4），回退 3 号出发区")
+            start_zone = 3
+        start_pose = StandardFieldLayout().get_start_pose(start_zone)
+        logger.info(f"抽签出发区 = {start_zone} 号 → 起点 {start_pose}")
 
         perception = PerceptionPipeline(use_mock=use_mock, my_safe_zone_color=my_color)
         navigation = NavigationPipeline(field_layout, my_color=my_color, use_mock=use_mock)
@@ -139,7 +150,12 @@ def main():
         camera = None
         if not use_mock:
             from .hardware.serial_chassis import SerialChassis
-            chassis = SerialChassis(port=os.environ.get("CHASSIS_PORT", "/dev/ttyUSB0"))
+            # 默认端口：RDK 板载 40PIN UART1 = /dev/ttyS1（已实测跑通 ODOM/IMU/TEL 与 VEL/STOP）；
+            # 电脑 USB-TTL 调试时用 CHASSIS_PORT=/dev/ttyUSB0 覆盖。
+            chassis = SerialChassis(port=os.environ.get("CHASSIS_PORT", "/dev/ttyS1"))
+            # 出发区初始位姿（真机原点），与导航定位器同步在 AutonomousState.on_enter 里强制执行
+            if start_pose is not None:
+                chassis.set_start_pose(*start_pose)
             # 必须显式 open()：否则 is_open=False，自检的 IMU/电机 会误判失败，且后续无法下发 VEL
             if not chassis.open():
                 logger.error(f"串口打开失败: {chassis._port}（请检查接线 / dialout 权限）")
@@ -203,6 +219,7 @@ def main():
             chassis=chassis,
             camera=camera,
             field_layout=field_layout,
+            start_zone=start_zone,
             my_color=my_color,
             use_mock=use_mock,
         )

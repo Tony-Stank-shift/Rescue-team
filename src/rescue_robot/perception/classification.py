@@ -99,39 +99,52 @@ class TargetClassifier:
     def _fuzzy_match(self, color: TargetColor,
                      shape: TargetShape) -> Optional[TargetInfo]:
         """
-        颜色容差匹配。
+        颜色容差匹配（**保守**）。
 
-        当精确 (color, shape) 不在配置表中时，尝试：
-        1. 相同形状 + 相近颜色
-        2. 相同颜色 + 相近形状
+        规则（改自审计 B5）：
+          1. 只做"同形状 + 相近颜色"，且**相近颜色之间不得跨越分值/类型**
+             （旧的 ORANGE→RED/YELLOW、BLACK↔BROWN 会命中不同分值的类型）；
+          2. 删除旧的"相同颜色 + 任意形状"宽松兜底 —— 它会把
+             "蓝色 + 未匹配形状"的场地元素当成浅蓝(危险目标)或反之；
+          3. 危险目标（DANGEROUS）**只认精确匹配**：宁可漏检，绝不把
+             救援目标判成危险目标（漏运=丢分）或把危险目标判成救援目标（违规）。
         """
-        # 颜色相似度映射（用于容差匹配）
+        # 相近颜色映射：只保留"相邻色相、同分值语义"的映射
+        #   LIGHT_BLUE ↔ BLUE 已删除：两者分属 危险 vs 救援，混判代价最高。
         color_similarity: Dict[TargetColor, List[TargetColor]] = {
-            TargetColor.LIGHT_BLUE: [TargetColor.BLUE, TargetColor.WHITE],
-            TargetColor.BLUE: [TargetColor.LIGHT_BLUE],
-            TargetColor.ORANGE: [TargetColor.RED, TargetColor.YELLOW],
             TargetColor.RED: [TargetColor.ORANGE],
-            TargetColor.BROWN: [TargetColor.BLACK, TargetColor.ORANGE],
-            TargetColor.BLACK: [TargetColor.BROWN],
+            TargetColor.ORANGE: [TargetColor.RED],
+            TargetColor.BLACK: [],      # 不再映射到 BROWN（棕色可能是另一种分值）
+            TargetColor.BROWN: [],
         }
 
-        # 1. 相同形状 + 相近颜色
-        similar_colors = color_similarity.get(color, [])
-        for sim_color in similar_colors:
-            key = (sim_color, shape)
-            if key in self._config:
-                info = self._config[key]
-                logger.info(f"容差匹配 (颜色): {color.name}→{sim_color.name}, "
-                            f"→ {info.description}")
-                return info
+        for sim_color in color_similarity.get(color, []):
+            info = self._config.get((sim_color, shape))
+            if info is None:
+                continue
+            if info.type == TargetType.DANGEROUS:
+                continue            # 绝不通过容差判成危险目标
+            logger.info(f"容差匹配 (颜色): {color.name}→{sim_color.name}, "
+                        f"→ {info.description}")
+            return info
 
-        # 2. 相同颜色 + 任意形状（宽松匹配）
-        for (c, s), info in self._config.items():
-            if c == color:
-                logger.info(f"容差匹配 (形状): {shape.name}→{s.name}, "
-                            f"→ {info.description}")
-                return info
+        # ── 受限的"同色兜底"（形状被判错时救回来，但不碰危险目标）──
+        # 只有满足全部条件才允许：
+        #   ① 该颜色在配置表里**只对应一种类型**（无色歧义）；
+        #   ② 映射结果不是 DANGEROUS（绝不因形状判错而把东西判成危险目标）；
+        #   ③ 该颜色本身不是 LIGHT_BLUE（危险目标只认精确匹配）。
+        # 旧的实现是无条件"同色任意形状"兜底 → 会把"蓝色 + 未匹配形状"直接判成
+        # 浅蓝危险目标（救援目标永不被搬 = 丢分）。
+        infos_same_color = [info for (c, _s), info in self._config.items() if c == color]
+        if (color != TargetColor.LIGHT_BLUE
+                and len(infos_same_color) == 1
+                and infos_same_color[0].type != TargetType.DANGEROUS):
+            info = infos_same_color[0]
+            logger.info(f"容差匹配 (受限同色兜底): {color.name} → {info.description}"
+                        f"（该颜色在配置表中唯一且非危险目标）")
+            return info
 
+        logger.debug(f"容差匹配失败（宁漏不误）: color={color.name}, shape={shape.name}")
         return None
 
     def get_target_info(self, target_type: TargetType) -> List[TargetInfo]:

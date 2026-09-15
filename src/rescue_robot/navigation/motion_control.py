@@ -117,10 +117,22 @@ class MotionController:
     BUMP_SPEED_MM_S = 200.0             # 越障速度
     BUMP_CROSS_TIME_S = 1.0             # 单根减速带通过时间
 
+    # 限速 / 轮距（可由 YAML robot.motors.* 覆盖，config.apply_robot_config 注入）
+    DEFAULT_MAX_LINEAR_SPEED = 850.0
+    DEFAULT_MAX_ANGULAR_SPEED = 3.0
+    DEFAULT_WHEEL_BASE_MM = 209.0
+
     def __init__(self,
-                 max_linear_speed: float = 850.0,
-                 max_angular_speed: float = 3.0,
-                 wheel_base_mm: float = 209.0):
+                 max_linear_speed: Optional[float] = None,
+                 max_angular_speed: Optional[float] = None,
+                 wheel_base_mm: Optional[float] = None):
+        # None → 用类级默认值（可被 YAML 注入覆盖）
+        max_linear_speed = (self.DEFAULT_MAX_LINEAR_SPEED
+                            if max_linear_speed is None else max_linear_speed)
+        max_angular_speed = (self.DEFAULT_MAX_ANGULAR_SPEED
+                             if max_angular_speed is None else max_angular_speed)
+        wheel_base_mm = (self.DEFAULT_WHEEL_BASE_MM
+                         if wheel_base_mm is None else wheel_base_mm)
         self._max_v = max_linear_speed
         self._max_w = max_angular_speed
         self._wheel_base = wheel_base_mm

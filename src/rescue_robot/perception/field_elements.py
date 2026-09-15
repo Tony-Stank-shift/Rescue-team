@@ -10,6 +10,7 @@ field_elements.py —— 场地元素定义
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional, Tuple
@@ -275,6 +276,43 @@ class StandardFieldLayout:
 
     def get_start_zones(self) -> List[FieldElement]:
         return self.get_elements_by_type(FieldElementType.START_ZONE)
+
+    def get_start_zone(self, zone_id: int) -> Optional[FieldElement]:
+        """按区号（1~4）取出发区元素。区号定义见 _build_layout 的 start_positions。"""
+        zones = self.get_start_zones()
+        if 1 <= zone_id <= len(zones):
+            return zones[zone_id - 1]
+        return None
+
+    def get_start_pose(self, zone_id: int,
+                       heading_mode: str = "inward") -> Optional[Tuple[float, float, float]]:
+        """
+        出发区位姿 (x_mm, y_mm, theta_rad) —— 全场坐标系的唯一来源。
+
+        现场是**抽签决定 1/2/3/4 号出发区**的，软件必须按抽签结果初始化坐标系，
+        否则（旧实现写死 3 号区）抽到 1/2/4 号区时全场地图平移 ≥2700mm → 第一步就走错。
+
+        Args:
+            zone_id: 抽签得到的出发区号 1~4
+            heading_mode:
+                "inward"（默认）—— 朝场地内侧（1/2 号区朝 -Y，3/4 号区朝 +Y），
+                    不依赖安全区颜色，简单可预测；
+                "center"—— 朝场地中心 (1500,1500) 方向。
+        Returns:
+            (x, y, theta)；区号非法返回 None
+        """
+        elem = self.get_start_zone(zone_id)
+        if elem is None:
+            return None
+        cx, cy = elem.region.center
+
+        if heading_mode == "center":
+            import math as _m
+            return (cx, cy, _m.atan2(FIELD_SIZE / 2 - cy, FIELD_SIZE / 2 - cx))
+
+        # 出发区在四角：上半场(y>1500)朝 -Y（+Y 是场外），下半场朝 +Y
+        theta = -math.pi / 2 if cy > FIELD_SIZE / 2 else math.pi / 2
+        return (cx, cy, theta)
 
     def get_safe_zone(self, color: SafeZoneColor) -> Optional[FieldElement]:
         for e in self._elements:

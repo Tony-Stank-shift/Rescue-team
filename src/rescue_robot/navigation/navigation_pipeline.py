@@ -123,10 +123,18 @@ class NavigationPipeline:
     # ---- 目标设置 ----
 
     def set_target(self, x: float, y: float) -> None:
-        """设置导航目标"""
-        self._target = (x, y)
+        """设置导航目标。
+
+        目标点若落在 hard 禁区（对方安全区 / 场地外）内部，先钳制到最近的合法位置
+        再下发 —— 否则车会径直开进对方安全区（赛项：进入对方安全区 → 比赛结束）。
+        """
+        safe_x, safe_y = self._forbidden.clamp_to_safe(x, y)
+        if (safe_x, safe_y) != (x, y):
+            logger.warning(f"⚠️ 导航目标 ({x:.0f}, {y:.0f}) 落在禁区内 → "
+                           f"钳制到 ({safe_x:.0f}, {safe_y:.0f})")
+        self._target = (safe_x, safe_y)
         self._state = NavState.PLANNING
-        logger.info(f"新导航目标: ({x:.0f}, {y:.0f})")
+        logger.info(f"新导航目标: ({safe_x:.0f}, {safe_y:.0f})")
 
     def clear_target(self) -> None:
         self._target = None
@@ -158,6 +166,18 @@ class NavigationPipeline:
         if current_pose is None:
             pose = self._localizer.pose
             current_pose = (pose.x, pose.y, pose.theta)
+
+        # ── 硬禁区检查（对方安全区 / 场地边界）──
+        # ⚠️ 必须在**所有分支之前**统一执行。旧实现只在"路径跟踪"分支里查，
+        # 于是"接近段(dist < close_range)"与"到达"两个分支完全绕过检查：
+        # 只要目标点落在对方安全区附近，车就会直接开进去 → 赛项判违规/比赛结束。
+        violation = self._forbidden.check_violation(current_pose[0], current_pose[1])
+        if violation is not None:
+            logger.warning(f"⚠️ 进入禁区: {violation.name} — {violation.penalty}")
+            back_cmd = VelocityCommand(linear=-200.0, angular=0.0, timestamp=time.time())
+            self._localizer.update(back_cmd.linear, back_cmd.angular, dt)
+            self._state = NavState.AVOIDING
+            return back_cmd
 
         # 无目标 → 停止
         if self._target is None:
@@ -260,14 +280,8 @@ class NavigationPipeline:
             self._total_distance += abs(cmd.linear) * dt
             self._localizer.update(cmd.linear, cmd.angular, dt)
 
-            # 禁区检查
-            violation = self._forbidden.check_violation(
-                current_pose[0], current_pose[1]
-            )
-            if violation:
-                logger.warning(f"⚠️ 进入禁区: {violation.name} — {violation.penalty}")
-                return VelocityCommand(linear=-200.0, angular=0.0, timestamp=time.time())
-
+            # 注：禁区检查已上移到 update() 开头统一执行（覆盖接近段/到达等所有分支），
+            # 此处不再重复检查。
             return cmd
 
         return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())

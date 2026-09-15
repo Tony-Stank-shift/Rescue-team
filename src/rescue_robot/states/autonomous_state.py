@@ -11,6 +11,7 @@ autonomous_state.py —— AUTONOMOUS 状态
 """
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime
@@ -23,8 +24,9 @@ from ..perception.field_elements import FieldLayout, SafeZoneColor
 from ..perception.perception_pipeline import PerceptionPipeline
 from ..navigation.navigation_pipeline import NavigationPipeline
 from ..navigation.motion_control import VelocityCommand
-from ..decision.decision_engine import DecisionEngine, Action, ActionType
-from ..transport.transport_pipeline import TransportPipeline
+from ..decision.decision_engine import (DecisionEngine, Action, ActionType,
+                                       StrategyState)
+from ..transport.transport_pipeline import TransportPipeline, TransportPhase
 from ..hardware.serial_chassis import SerialChassis
 
 logger = logging.getLogger("autonomous_state")
@@ -52,6 +54,13 @@ class AutonomousState:
     WATCHDOG_SURVIVAL_S = 13.0    # 无动作 → 保命绕圈
     WATCHDOG_HARD_LIMIT_S = 15.0  # 最后防线：仍不淘汰，仅持续保命运动
 
+    # ── "有没有动作"的判据：里程计**实际位移**，不是下发速度 ──
+    # 旧实现看 `abs(cmd.linear) > 10`：轮子卡在围栏上/打滑空转时指令一直是几百 mm/s，
+    # 看门狗永远不触发 → 车原地耗到比赛时间结束（整场 0 分）。
+    WATCHDOG_MOVE_MM = 40.0       # 一个窗口内累计位移超过此值 = 确实在动
+    WATCHDOG_STEP_MIN_MM = 1.0    # 单帧位移下限：滤掉里程计抖动，避免把噪声当运动
+    STUCK_WARN_S = 3.0            # 在下发速度却迟迟不动 → 提前告警（现场定位用）
+
     def __init__(self, state_machine, indicator,
                  perception: Optional[PerceptionPipeline] = None,
                  decision: Optional[DecisionEngine] = None,
@@ -62,7 +71,8 @@ class AutonomousState:
                  field_layout: Optional[FieldLayout] = None,
                  my_color: SafeZoneColor = SafeZoneColor.RED,
                  use_mock: bool = True,
-                 controller=None):
+                 controller=None,
+                 start_zone: int = 3):
         """
         Args:
             state_machine: StateMachine 实例
@@ -77,12 +87,20 @@ class AutonomousState:
             my_color: 本队安全区颜色（抽签确定）
             use_mock: True=内部创建 Mock 定位/检测
             controller: 底盘执行器（执行 VelocityCommand），chassis 为空时使用
+            start_zone: 抽签得到的出发区号 1~4（决定全场坐标系原点与朝向）
         """
         self._sm = state_machine
         self._indicator = indicator
         self._controller = controller
         self._chassis = chassis  # SerialChassis 实例（真机：位姿来源 + 速度下发）
         self._camera = camera  # cv2.VideoCapture 实例（真机视觉读帧）
+
+        # 出发区位姿：坐标系唯一来源（现场抽签决定 1~4 号区）
+        from ..perception.field_elements import StandardFieldLayout
+        self._start_zone = int(start_zone)
+        _pose = StandardFieldLayout().get_start_pose(self._start_zone) \
+            or (150.0, 150.0, 1.5707963267948966)
+        self._start_pose: tuple = _pose
 
         # ── 四大管线（注入或内部创建）──
         self._field = field_layout or FieldLayout.standard()
@@ -120,14 +138,24 @@ class AutonomousState:
         # 一趟转运的标志协调（DecisionEngine 与 TransportPipeline 之间）
         self._trip_gripped = False    # 当前目标是否已套取
         self._trip_released = False   # 当前目标是否已投放
+        self._trip_released_valid = False  # 本次投放是否**有效**（落点入正确区域）
         self._prev_current_id = None  # 决策引擎上一帧选中的目标 id（检测"新一趟"）
+        self._finished_logged = False  # 终场停车只做一次（S-01）
 
         # 看门狗
         self._last_action_time = time.time()
         self._explore_triggered = False
         self._survival_triggered = False
         self._last_action: Optional[Action] = None
-        self._pose: tuple = (150.0, 150.0, 1.5707963267948966)  # 上次位姿（串口无数据时保持）
+        # 上次位姿（串口无数据时保持）：初值 = 出发区位姿（见 on_enter 再次强制下发）
+        self._pose: tuple = tuple(self._start_pose)
+
+        # 看门狗：按里程计实际位移判定"是否在动"（见 _update_watchdog）
+        self._last_motion_pose: Optional[tuple] = None   # 上一帧位姿
+        self._motion_accum_mm: float = 0.0               # 本窗口累计位移
+        self._last_motion_time: float = time.time()      # 上次"确实在动"的时刻
+        self._stuck_warned: bool = False                 # 打滑/堵转告警去重
+        self._last_velocity: tuple = (0.0, 0.0)          # 由位姿差算出的实际速度（mm/s）
 
         logger.info(f"AutonomousState 初始化: mock={use_mock}, "
                     f"my_color={my_color.name}, chassis={'是' if chassis else '否'}")
@@ -149,6 +177,10 @@ class AutonomousState:
         # 比赛开始
         self._decision.start_match()
 
+        # ── 按抽签出发区初始化坐标系（必须在任何导航之前）──
+        # 旧实现把原点写死 (150,150,90°)（= 3 号区），抽到别的区全场错位。
+        self._apply_start_pose()
+
         # 真机：若配置了串口底盘，先打开并启动（PING→START 确认连接）
         if self._chassis is not None:
             if not self._chassis.is_open:
@@ -168,6 +200,12 @@ class AutonomousState:
         self._last_action_time = time.time()
         self._explore_triggered = False
         self._survival_triggered = False
+        self._finished_logged = False   # 终场停车标志复位（S-01）
+        # 看门狗位移窗口复位（否则上一轮/初始化前的位姿差会被算成本轮位移）
+        self._last_motion_pose = None
+        self._motion_accum_mm = 0.0
+        self._last_motion_time = time.time()
+        self._stuck_warned = False
         self._loop_thread = threading.Thread(
             target=self._main_loop,
             name="autonomous-loop",
@@ -175,6 +213,27 @@ class AutonomousState:
         )
         self._loop_thread.start()
         logger.info("主循环已启动")
+
+    def _apply_start_pose(self) -> None:
+        """
+        把出发区位姿下发到：① 下位机里程计参考系 ② 导航定位器 ③ 本状态内部位姿。
+
+        三个地方必须一致，否则"车认为在 A、导航认为在 B"→ 目标点整体偏移。
+        """
+        x, y, theta = self._start_pose
+        self._pose = (x, y, theta)
+        if self._chassis is not None:
+            try:
+                self._chassis.set_start_pose(x, y, theta)
+            except Exception as e:
+                logger.warning(f"下发出发区位姿到串口底盘失败: {e}")
+        try:
+            self._navigation.reset_pose(x, y, theta)
+        except Exception as e:
+            logger.warning(f"同步导航定位器位姿失败: {e}")
+        logger.info(f"坐标系初始化：出发区 {self._start_zone} 号，"
+                    f"起点=({x:.0f}, {y:.0f})mm，朝向={math.degrees(theta):.0f}°"
+                    f"（请现场核对是否与抽签结果一致）")
 
     def on_exit(self) -> None:
         """退出 AUTONOMOUS 状态：停止主循环"""
@@ -216,6 +275,24 @@ class AutonomousState:
 
     def _run_once(self, dt: float) -> None:
         """单帧编排：决策 → 执行 → 导航 → 转运 → 联动 → 看门狗。"""
+        # ── 终场停车（S-01）──
+        # 旧实现：主循环只认 `_stop_event`（状态切换/Ctrl+C），**没有任何"比赛结束"处理**。
+        # 时间到（或目标全清）后决策引擎已经返回 WAIT，但导航里还留着最后一个目标、
+        # 主循环仍以 50Hz 下发上一帧速度 → 机器人继续朝场地里冲，撞紫边/撞对手/
+        # 把已投放的目标撞出安全区（现场直接判罚）。规则要求终场立即停止。
+        # 这里把"决策引擎进入 DONE"当作终场信号：清导航目标 + 显式停车 + 退出主循环。
+        if self._decision.strategy_state == StrategyState.DONE:
+            if not self._finished_logged:
+                self._finished_logged = True
+                logger.info("🏁 比赛结束（决策引擎 DONE）→ 清导航目标 + 停车")
+                try:
+                    self._navigation.clear_target()
+                except Exception as e:
+                    logger.warning(f"清导航目标失败: {e}")
+                self._stop_chassis()
+            self._stop_event.set()
+            return
+
         # ── 位姿来源：优先串口（下位机里程计），否则用导航定位器 ──
         if self._chassis is not None:
             pose_data = self._chassis.read_pose()
@@ -232,6 +309,7 @@ class AutonomousState:
         if cur_id is not None and cur_id != self._prev_current_id:
             self._trip_gripped = False
             self._trip_released = False
+            self._trip_released_valid = False
         self._prev_current_id = cur_id
 
         nav_arrived = self._navigation.is_arrived()
@@ -254,14 +332,20 @@ class AutonomousState:
             except Exception as e:
                 logger.warning(f"读取摄像头失败: {e}")
                 frame = None
-        self._perception.update(frame=frame, robot_position=(x, y))
+        # 必须把航向一起传下去：车体系→场地系要按 theta 旋转（否则目标定位随车头方向整体错位）
+        self._perception.update(frame=frame, robot_position=(x, y), robot_theta=theta)
 
-        # ── 2. 决策 ──
+        # ── 2. 决策（把由位姿差算出的实际速度传下去，供内置异常链判定"是否在动"）──
         action = self._decision.update(
             (x, y, theta),
             nav_arrived=nav_arrived,
             grip_done=grip_done,
             release_done=release_done,
+            velocity=self._last_velocity,
+            release_valid=self._trip_released_valid,
+            # S-40：本趟**真正**送达的目标 id（计划 ≠ 实际装载）。
+            # 没套上的目标必须留在场上等下一趟，不能标记成已入安全区。
+            delivered_ids=self._transport.delivered_target_ids,
         )
         self._last_action = action
 
@@ -276,6 +360,8 @@ class AutonomousState:
                 if tracks:
                     self._transport.start_trip(tracks)
                     self._trip_gripped = False
+                    self._trip_released = False
+                    self._trip_released_valid = False
         elif action.type == ActionType.TRANSPORT_TO:
             self._set_nav_target(action.target_position)
         elif action.type == ActionType.EMERGENCY_STOP:
@@ -304,14 +390,12 @@ class AutonomousState:
         # ── 8. 投放联动 ──
         if self._transport.is_complete() and self._trip_gripped:
             self._trip_released = True
+            # 投放有效性来自转运管线的**落点判定**（LoadManager.release_all 回填）
+            self._trip_released_valid = bool(
+                self._transport.load_manager.last_release_valid)
 
-        # ── 9. 看门狗：有实际动作则更新 ──
-        if abs(cmd.linear) > 10.0 or abs(cmd.angular) > 0.01:
-            self._last_action_time = time.time()
-            self._explore_triggered = False
-            self._survival_triggered = False
-        else:
-            self._check_watchdog()
+        # ── 9. 看门狗：按【里程计实际位移】判定是否在动（不是看下发速度）──
+        self._update_watchdog((x, y), cmd, dt=dt)
 
     def _set_nav_target(self, pos) -> None:
         """设置导航目标（去重，避免每帧重复触发重规划）。"""
@@ -340,26 +424,97 @@ class AutonomousState:
 
     # ---- 看门狗 ----
 
-    def _check_watchdog(self) -> None:
+    def _update_watchdog(self, pose_xy, cmd, dt: float = 0.02,
+                         now: Optional[float] = None) -> float:
+        """
+        看门狗：按**里程计实际位移**判定"是否在动"，并做分级降级保活。
+
+        为什么不能用"下发速度 cmd"当判据（旧实现的致命缺陷）：
+          车轮卡在围栏/减速带上打滑空转时，指令一直是几十~几百 mm/s，
+          `abs(cmd.linear) > 10` 恒成立 → 保活计时被无限刷新 →
+          机器人在原地耗到比赛时间结束（整场 0 分，且日志里什么都看不到）。
+        改为：只有下位机里程计位置**真的变了**（累计位移 ≥ WATCHDOG_MOVE_MM）才算动。
+
+        Args:
+            pose_xy: 本帧位姿 (x, y)（真机来自串口 ODOM，Mock 来自导航定位器）
+            cmd: 本帧下发的速度指令（仅用于"打滑告警"诊断，不用于判定是否在动）
+            dt: 帧间隔（秒），用于由位移差算实际速度
+            now: 注入时钟（便于测试；None → time.time()）
+
+        Returns:
+            当前"无位移"持续时长（秒），便于上层/测试观察
+        """
+        if now is None:
+            now = time.time()
+
+        x, y = float(pose_xy[0]), float(pose_xy[1])
+
+        if self._last_motion_pose is None:
+            self._last_motion_pose = (x, y)
+
+        step_mm = math.hypot(x - self._last_motion_pose[0],
+                             y - self._last_motion_pose[1])
+        self._last_motion_pose = (x, y)
+
+        # 实际速度（mm/s）：供决策引擎内置异常链使用
+        if dt > 0:
+            self._last_velocity = (step_mm / dt, 0.0)
+
+        # 累计位移：滤掉里程计抖动（小于 WATCHDOG_STEP_MIN_MM 的单帧不计）
+        if step_mm >= self.WATCHDOG_STEP_MIN_MM:
+            self._motion_accum_mm += step_mm
+
+        if self._motion_accum_mm >= self.WATCHDOG_MOVE_MM:
+            # 确实在动 → 刷新保活计时、解除降级
+            self._motion_accum_mm = 0.0
+            self._last_motion_time = now
+            self._last_action_time = now
+            self._explore_triggered = False
+            self._survival_triggered = False
+            self._stuck_warned = False
+            return 0.0
+
+        idle_duration = now - self._last_motion_time
+
+        # 打滑/堵转诊断：在发速度却不动 → 提前告警（现场一眼看出是哪一类故障）
+        commanded = abs(cmd.linear) > 10.0 or abs(cmd.angular) > 0.01
+        if commanded and idle_duration > self.STUCK_WARN_S and not self._stuck_warned:
+            self._stuck_warned = True
+            logger.error(
+                f"⚠️ 已下发速度(cmd v={cmd.linear:.0f}mm/s)但 {idle_duration:.1f}s 无位移 "
+                f"→ 疑似打滑/堵转/编码器失效（位置=({x:.0f},{y:.0f})）"
+            )
+
+        # 套取/投放阶段本来就要车静止，属合法静止 → 不打断（否则看门狗会
+        # 在套取过程中把导航目标改成"探索点"，与转运抢方向盘）
+        if self._transport.phase in (TransportPhase.CAPTURING,
+                                     TransportPhase.PLACING):
+            return idle_duration
+
+        self._check_watchdog(idle_duration)
+        return idle_duration
+
+    def _check_watchdog(self, idle_duration: Optional[float] = None) -> None:
         """
         分级看门狗保活（对齐 MEMORY 四层降级保活链）：
 
-          无动作 > 10s  → 探索模式（驶向场地随机位置边移动边扫描）
-          无动作 > 13s  → 保命绕圈（低速绕圈，保持运动）
-          无动作 > 15s  → 不再淘汰，持续保命运动（保持比赛资格）
+          无位移 > 10s  → 探索模式（驶向场地随机位置边移动边扫描）
+          无位移 > 13s  → 保命绕圈（低速绕圈，保持运动）
+          无位移 > 15s  → 不再淘汰，持续保命运动（保持比赛资格）
 
         不再因为 15 秒无动作而 emergency_stop。
         """
-        idle_duration = time.time() - self._last_action_time
+        if idle_duration is None:
+            idle_duration = time.time() - self._last_motion_time
 
         if idle_duration > self.WATCHDOG_SURVIVAL_S and not self._survival_triggered:
             self._survival_triggered = True
             self._navigation.survival_circle()
-            logger.warning(f"🛟 保命绕圈：{idle_duration:.1f}s 无动作")
+            logger.warning(f"🛟 保命绕圈：{idle_duration:.1f}s 无位移")
         elif idle_duration > self.WATCHDOG_EXPLORE_S and not self._explore_triggered:
             self._explore_triggered = True
             self._navigation.explore()
-            logger.warning(f"🔍 探索模式：{idle_duration:.1f}s 无动作")
+            logger.warning(f"🔍 探索模式：{idle_duration:.1f}s 无位移")
 
     def _lock_external_inputs(self) -> None:
         """

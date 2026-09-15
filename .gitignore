@@ -3,3 +3,6 @@ __pycache__/
 *.pyo
 .DS_Store
 *.log
+
+# AgentTeams 运行时状态（本机协作产物，不入库）
+.agent-teams/

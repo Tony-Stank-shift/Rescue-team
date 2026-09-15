@@ -12,6 +12,7 @@ perception_pipeline.py —— 主感知管线
 """
 
 import logging
+import math
 import time
 from typing import List, Optional, Tuple
 
@@ -70,6 +71,7 @@ class PerceptionPipeline:
         # 最近一帧的原始检测结果（供"套取视觉确认"等使用，像素空间）
         self._last_detections: List[Detection] = []
         self._last_frame_size: Optional[Tuple[int, int]] = None
+        self._theta_warned = False   # 只告警一次：调用方未传 robot_theta
 
         # 统计
         self._frame_count = 0
@@ -144,7 +146,8 @@ class PerceptionPipeline:
 
     def update(self, frame=None,
                robot_position: Optional[Tuple[float, float]] = None,
-               timestamp: Optional[float] = None) -> WorldMap:
+               timestamp: Optional[float] = None,
+               robot_theta: Optional[float] = None) -> WorldMap:
         """
         单帧感知更新。
 
@@ -152,6 +155,8 @@ class PerceptionPipeline:
             frame: 摄像头帧（BGR numpy 数组），Mock 模式下可为 None
             robot_position: 机器人当前场地坐标，None 则从 sensor_fusion 获取
             timestamp: 时间戳
+            robot_theta: 机器人航向（rad，从 +X 逆时针）。**必须传**，
+                否则车体系→场地系的换算会退化成"只平移不旋转"，目标定位随车头方向整体错位。
 
         Returns:
             更新后的 WorldMap
@@ -204,11 +209,25 @@ class PerceptionPipeline:
                         confidence=target.confidence,
                     ),
                 )
-            # 转换到场地坐标（机器人位置 + 相对位置）
-            target.position = (
-                robot_position[0] + pos[0],
-                robot_position[1] + pos[1],
-            )
+            # ── 车体系 → 场地系：**必须按机器人航向旋转**（修复 S-05）──
+            # 旧实现直接把车体系偏移加到场地坐标（只平移、不旋转）→ 目标定位随车头方向
+            # 整体错位，表现为"明明感知到目标却永远抓不到"。
+            # 约定：theta 从 +X 逆时针；车体"前"=(cosθ,sinθ)、车体"右"=(sinθ,-cosθ)；
+            #      estimate_* 返回 (右向偏移, 前向距离)。
+            right_off, forward = pos[0], pos[1]
+            if robot_theta is None:
+                # 未提供航向：保持旧行为，但**只告警一次**（不再静默错位）
+                if not self._theta_warned:
+                    logger.warning(
+                        "perception.update 未收到 robot_theta → 目标定位忽略机器人朝向，"
+                        "会随车头方向整体错位；请在调用处传 robot_theta=theta")
+                    self._theta_warned = True
+                dx, dy = right_off, forward
+            else:
+                c, s = math.cos(robot_theta), math.sin(robot_theta)
+                dx = forward * c + right_off * s
+                dy = forward * s - right_off * c
+            target.position = (robot_position[0] + dx, robot_position[1] + dy)
 
         # ─── 步骤 4：世界地图更新 ───
         self._world_map.update(detected_targets, robot_position, timestamp)

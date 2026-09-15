@@ -18,6 +18,7 @@ from enum import Enum, auto
 from typing import Dict, List, Optional, Set, Tuple
 
 from ..perception.target_types import TargetType, TargetInfo, get_point_value
+from ..config import thresholds as _thresholds
 
 logger = logging.getLogger("load_manager")
 
@@ -38,14 +39,17 @@ class Violation(Enum):
 
 
 # 违规后果映射
+# 违规后果映射（依据赛项原文，不再自行加码）
+#   "多于一个无效 / 超过 3 个无效 / 伤员不单独无效"= 该次转运**无效**，
+#   规则并未写"本轮结束"——旧实现把它们标成 is_fatal=True 会导致程序自我终止/卡死。
 VIOLATION_CONSEQUENCES = {
     Violation.NONE:                    ("无", False),
-    Violation.FIRST_TRIP_MULTI:        ("本轮结束，本次转运成绩无效", True),
-    Violation.FIRST_TRIP_WRONG_TYPE:   ("本轮结束，本次转运成绩无效", True),
-    Violation.OVER_LIMIT:              ("本轮结束，本次转运成绩无效", True),
-    Violation.INJURED_MULTI:           ("本轮结束，本次转运成绩无效", True),
-    Violation.DANGEROUS_TARGET:        ("本轮结束", True),
-    Violation.PLACEMENT_WRONG_ZONE:    ("扣 10 分/个，目标放回场地中心", False),
+    Violation.FIRST_TRIP_MULTI:        ("本次转运无效；首趟必须单独送 1 个普通物资到物资区围栏内侧", False),
+    Violation.FIRST_TRIP_WRONG_TYPE:   ("本次转运无效；首趟必须是普通物资", False),
+    Violation.OVER_LIMIT:              ("本次转运无效；单次最多 3 个", False),
+    Violation.INJURED_MULTI:           ("本次转运无效；伤员必须单独且一次只能 1 个", False),
+    Violation.DANGEROUS_TARGET:        ("不得转运危险目标；该目标无效", False),
+    Violation.PLACEMENT_WRONG_ZONE:    ("无效目标被取出重新随机放置场地中央（扣分细则待确认）", False),
 }
 
 
@@ -93,6 +97,11 @@ class LoadManager:
         self._total_trips = 0           # 累计转运次数
         self._total_delivered = 0       # 累计投放目标数
         self._total_score = 0           # 累计得分
+        # 首趟是否**有效**完成（唯一判据；见 is_first_trip）
+        self._first_trip_done = False
+        # 最近一次投放结果（供 DecisionEngine/AutonomousState 判定是否入区）
+        self._last_release_valid: Optional[bool] = None
+        self._last_release_types: List[TargetType] = []
 
     # ---- 属性 ----
 
@@ -102,13 +111,24 @@ class LoadManager:
 
     @property
     def is_first_trip(self) -> bool:
-        """是否是首次转运（首次转运完成前）"""
-        return self._total_trips == 0
+        """
+        是否仍处于"首趟未有效完成"状态。
+
+        ⚠️ 判据是 `_first_trip_done`（**首趟有效送达后**才置位），
+        不是"跑过一趟"。旧实现用 `_total_trips == 0`：
+          - 只要 release_all() 被调用过（哪怕空装载、哪怕投在围栏外）就不再算首趟
+            → "出发后必须先单独送 1 个普通物资到物资区围栏内侧"这条硬规则被绕过。
+        """
+        return not self._first_trip_done
 
     @property
     def is_first_trip_done(self) -> bool:
-        """首次转运是否已完成"""
-        return self._total_trips > 0
+        """首趟是否**有效**完成（1 个普通物资送进本队物资区围栏内侧）"""
+        return self._first_trip_done
+
+    def mark_first_trip_done(self) -> None:
+        """显式标记首趟已完成（供自测/复位使用，正常流程由 release_all 判定）。"""
+        self._first_trip_done = True
 
     @property
     def current_count(self) -> int:
@@ -133,6 +153,15 @@ class LoadManager:
     @property
     def total_score(self) -> int:
         return self._total_score
+
+    @property
+    def last_release_valid(self) -> Optional[bool]:
+        """最近一次投放是否有效（None=还没投放过）"""
+        return self._last_release_valid
+
+    @property
+    def last_release_types(self) -> List[TargetType]:
+        return list(self._last_release_types)
 
     # ---- 规则校验 ----
 
@@ -181,27 +210,50 @@ class LoadManager:
         return (True, Violation.NONE)
 
     def can_load_batch(self, targets: List[TargetInfo]) -> Tuple[bool, Violation]:
-        """批量检查"""
-        total_count = self._state.count
-        has_injured = self._state.has_injured
+        """
+        批量检查整趟装载是否合规。
 
+        ⚠️ 判定必须与顺序无关。旧实现按列表顺序逐项累加，导致
+        `[伤员, 普通]` 被放行（先看到伤员时车上还是空的），
+        而 `[普通, 伤员]` 才被拦下 —— 同一趟货因顺序不同结论相反，
+        直接违反"伤员必须单独转运且一次只能转运 1 个"。
+        """
+        # 空批次 = 没有任何装载动作：直接放行（也不触碰 targets[0]，避免 IndexError）
+        if not targets:
+            return (True, Violation.NONE)
+
+        # 先整体统计本批次构成，再做与顺序无关的判定
+        injured_in_batch = 0
+        other_in_batch = 0
         for info in targets:
             if info.type == TargetType.DANGEROUS:
                 return (False, Violation.DANGEROUS_TARGET)
             if info.type == TargetType.INJURED:
-                if has_injured or total_count > 0:
-                    return (False, Violation.INJURED_MULTI)
-                has_injured = True
-                total_count += 1
+                injured_in_batch += 1
             else:
-                total_count += 1
+                other_in_batch += 1
 
+        # 规则 4：伤员必须单独转运，且一次只能 1 个
+        #   - 本批含伤员 → 本批只能有这 1 个伤员，且必须空车开局
+        #   - 车上已装伤员 → 本批不得再装任何东西
+        if injured_in_batch:
+            if injured_in_batch > 1 or other_in_batch > 0:
+                return (False, Violation.INJURED_MULTI)
+            if self._state.count > 0 or self._state.has_injured:
+                return (False, Violation.INJURED_MULTI)
+        elif self._state.has_injured:
+            return (False, Violation.INJURED_MULTI)
+
+        total_count = self._state.count + len(targets)
+
+        # 规则 1：首次转运必须且仅转运 1 个普通物资
         if self.is_first_trip:
             if total_count != 1:
                 return (False, Violation.FIRST_TRIP_MULTI)
             if targets[0].type != TargetType.REGULAR_SUPPLY:
                 return (False, Violation.FIRST_TRIP_WRONG_TYPE)
 
+        # 规则 2：单次 ≤ 3 个
         if total_count > self.MAX_LOAD:
             return (False, Violation.OVER_LIMIT)
 
@@ -244,29 +296,47 @@ class LoadManager:
         释放所有装载目标（夹爪打开后调用）。
 
         Args:
-            placement_ok: 投放位置是否正确（物资入物资区 / 伤员入伤员区）
-            points_per_target: {target_id: points} 得分映射
+            placement_ok: 投放位置是否正确（物资入物资区 / 伤员入伤员区），
+                由调用方按**目标落点**判定后传入
+            points_per_target: {target_id: points} 得分映射（保留参数）
 
         Returns:
-            已释放的目标列表
+            已释放的目标列表（空装载/无效投放时语义见下）
+
+        规则语义（依据赛项原文）：
+          - 空装载调用：什么都不做，**不计趟次**（旧实现照样 +1，
+            把"首趟未完成"状态清掉 → 首趟硬规则被绕过）；
+          - 投放到错误区域：目标不计分，并按 penalty_per_target 扣分（❓数值待确认）；
+          - 首趟只有在"恰好 1 个普通物资 + 有效投进本队物资区围栏内侧"时才算完成，
+            否则保持 `is_first_trip=True`，必须重做首趟。
         """
         released = list(self._state.targets)
-        ids = self._state.target_ids.copy()
+
+        # ── 空装载：不是一趟转运，直接返回，不污染趟次/首趟状态 ──
+        if not released:
+            logger.info("release_all(): 当前无装载目标 → 忽略（不计趟次）")
+            return []
+
+        was_first_trip = self.is_first_trip
+        self._last_release_valid = bool(placement_ok)
+        self._last_release_types = [i.type for i in released]
 
         if not placement_ok:
-            logger.warning(f"投放位置错误: {len(released)} 个目标 — "
-                           f"{Violation.PLACEMENT_WRONG_ZONE}")
-            # 扣 10 分/个
-            penalty = 10 * len(released)
+            # 扣分（数值来源不明，见 config.Thresholds.PLACEMENT_PENALTY_PER_TARGET）
+            penalty_per = getattr(
+                _thresholds, "PLACEMENT_PENALTY_PER_TARGET", 10)
+            penalty = penalty_per * len(released)
             self._total_score = max(0, self._total_score - penalty)
-            logger.warning(f"扣分: -{penalty} (总={self._total_score})")
+            logger.warning(f"投放位置错误: {len(released)} 个目标 → 不计分, "
+                           f"扣 {penalty} 分 (总={self._total_score})")
 
-        # 累计得分
+        # 累计得分：只有**投放到正确区域**的目标才计分（旧实现投错了也照样加分，
+        # 先扣 10 再全部加回 → 惩罚被抵消，净收益仍为正）
         points = 0
-        for info in released:
-            p = get_point_value(info.type)
-            points += p
-        self._total_score += points
+        if placement_ok:
+            for info in released:
+                points += get_point_value(info.type)
+            self._total_score += points
 
         self._total_trips += 1
         self._total_delivered += len(released)
@@ -275,8 +345,26 @@ class LoadManager:
                      f"(总={self._total_score}分, {self._total_delivered}个, "
                      f"{self._total_trips}趟)")
 
-        # 重置状态
+        # ── 首趟闭环判定 ──
+        if was_first_trip:
+            first_ok = (
+                placement_ok
+                and len(released) == 1
+                and released[0].type == TargetType.REGULAR_SUPPLY
+            )
+            if first_ok:
+                self._first_trip_done = True
+                logger.info("✅ 首趟有效完成（1 个普通物资已进本队物资区围栏内侧）")
+            else:
+                logger.error(
+                    "❌ 首趟无效（要求：单独 1 个普通物资，且投进本队物资区围栏内侧）"
+                    "→ 必须重做首趟；在首趟有效完成前，其它目标一律无效"
+                )
+
+        # 重置装载状态
         self._state = LoadState()
+
+        return released
 
         return released
 
@@ -298,6 +386,9 @@ class LoadManager:
         self._total_trips = 0
         self._total_delivered = 0
         self._total_score = 0
+        self._first_trip_done = False
+        self._last_release_valid = None
+        self._last_release_types = []
         logger.info("LoadManager 完全重置")
 
     def summary(self) -> str:

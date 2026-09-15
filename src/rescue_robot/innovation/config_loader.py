@@ -402,6 +402,30 @@ class FallbackConfig:
 
 
 @dataclass
+class PlacementConfig:
+    """
+    套取/投放机构几何与扣分（现场标定项，无需重编译）。
+
+    ⚠️ 这几个值是**机构标定参数**，必须真机实测后填：
+      - drop_forward_mm：释放瞬间目标（在 U 型槽内）相对车心的前伸距离，
+        用于把"车身位置"换算成"目标落点"，投放有效性判定就是按它算的；
+      - push_dist_mm：推式放置时向斜坡方向的推入距离。
+      - sleeve_max_hold：一趟能**真正套住**几个目标（套取机构物理容量）。
+        **只能填 1**：单只 SG90 只有"套住/释放"一个自由度，每次下压前都要先抬爪
+        （抬爪 = 释放），先套住的目标会被放掉；且决策引擎的 grip_done 契约仍假设
+        一趟只套 1 个。填 >1 会被强制回退 1 并打 ERROR 日志（受控 A/B 实测
+        =3 只送 4 个 / 50 分，比 =1 的 7~8 个 / 80 分更差，还会让软件把没带上的
+        目标谎报为已送达）。详见 docs/audit/FIXES.md 的 S-40。
+    """
+    drop_forward_mm: float = 150.0
+    push_dist_mm: float = 100.0
+    sleeve_max_hold: int = 1
+    # ❓ 该数值来源不明：PDF 只写"无效目标被取出重新随机放置场地中央"，
+    #    未给扣分细则；暂按 10 分/个，待现场确认后修改。
+    penalty_per_target: int = 10
+
+
+@dataclass
 class RobotConfig:
     """
     机器人完整配置。
@@ -416,6 +440,7 @@ class RobotConfig:
     strategy_weights: StrategyWeightsConfig = field(default_factory=StrategyWeightsConfig)
     match: MatchConfig = field(default_factory=MatchConfig)
     fallback: FallbackConfig = field(default_factory=FallbackConfig)
+    placement: PlacementConfig = field(default_factory=PlacementConfig)
 
     @classmethod
     def from_yaml(cls, path: str, base: Optional["RobotConfig"] = None) -> "RobotConfig":
@@ -437,6 +462,7 @@ class RobotConfig:
         sw_data = robot_data.get("strategy_weights", {})
         match_data = robot_data.get("match", {})
         fallback_data = robot_data.get("fallback", {})
+        placement_data = robot_data.get("placement", {})
 
         pid_data = motors_data.get("pid", {})
         pid_angle_data = motors_data.get("pid_angle", {})
@@ -469,6 +495,9 @@ class RobotConfig:
             ),
             fallback=FallbackConfig(
                 **{**asdict(base.fallback), **fallback_data}
+            ),
+            placement=PlacementConfig(
+                **{**asdict(base.placement), **placement_data}
             ),
         )
 

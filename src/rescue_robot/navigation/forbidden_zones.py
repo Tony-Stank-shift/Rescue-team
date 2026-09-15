@@ -150,6 +150,47 @@ class ForbiddenZoneManager:
                 return zone
         return None
 
+    # 把点推出禁区时额外留的余量（mm）。
+    # RectRegion.contains 是闭区间（px <= x_max 才算在内），所以必须 > 0，
+    # 否则会"推出到边界上"仍被判为在禁区内，形成死循环。
+    CLAMP_EPS_MM = 1.0
+
+    def clamp_to_safe(self, x: float, y: float,
+                      margin_mm: float = 0.0) -> Tuple[float, float]:
+        """
+        把落在 hard 禁区内的点推到禁区外最近的合法位置。
+
+        用途：决策/转运给出的导航目标点若落在对方安全区（或场外）内部，
+        **必须**先钳制掉再下发，否则车会径直开进对方安全区
+        （赛项：不能进入对方安全区，否则比赛结束）。
+
+        多禁区重叠时迭代推出（最多 8 次）；仍无法推出时退到场地中心一带。
+        """
+        eps = max(margin_mm, self.CLAMP_EPS_MM)
+        for _ in range(8):
+            zone = self.check_violation(x, y)
+            if zone is None:
+                return (x, y)
+            r = zone.region
+            candidates = [
+                (r.x - eps, y),                 # 往左推出
+                (r.x + r.width + eps, y),       # 往右推出
+                (x, r.y - eps),                 # 往下推出
+                (x, r.y + r.height + eps),      # 往上推出
+            ]
+            nxt = min(candidates, key=lambda p: (p[0] - x) ** 2 + (p[1] - y) ** 2)
+            if nxt == (x, y):
+                break
+            x, y = nxt
+
+        # 兜底：推到场地中心；若中心也在禁区内则取场地四分之一处
+        for fallback in ((FIELD_SIZE / 2, FIELD_SIZE / 2),
+                         (FIELD_SIZE * 0.25, FIELD_SIZE * 0.25)):
+            if self.check_violation(*fallback) is None:
+                logger.error(f"目标点无法推出禁区，回退到 {fallback}")
+                return fallback
+        return (x, y)
+
     def get_violation_warning(self, x: float, y: float,
                               warning_distance_mm: float = 150.0) -> Optional[ForbiddenZone]:
         """检查是否接近禁区（预警距离内）"""

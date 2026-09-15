@@ -24,6 +24,7 @@ from ..perception.target_types import (
 )
 from ..perception.world_map import TrackedTarget
 from ..perception.field_elements import FieldLayout, SafeZoneColor
+from ..config import Placement as cfg_placement
 
 logger = logging.getLogger("transport_pipeline")
 
@@ -103,10 +104,37 @@ class TransportPipeline:
         self._place_steps = 4           # 放置分步上调次数
         self._place_step = 0            # 当前放置步
         self._place_started = False     # 是否已开始推式放置
-        self._push_dist_mm = 100.0      # 推入斜坡距离（真机标定）
+        # 推入斜坡距离 / 落点前伸量：真机标定项，来自 config.Placement（YAML 可改）
+        self._push_dist_mm = float(getattr(cfg_placement, "PUSH_DIST_MM", 100.0))
+        # 套取机构物理容量（一趟最多真正套住几个）：默认 1，见 config.Placement
+        try:
+            self._sleeve_max_hold = max(
+                1, min(3, int(getattr(cfg_placement, "SLEEVE_MAX_HOLD", 1))))
+        except (TypeError, ValueError):
+            self._sleeve_max_hold = 1
+        if self._sleeve_max_hold > 1:
+            logger.error(
+                f"SLEEVE_MAX_HOLD={self._sleeve_max_hold} > 1：逐个套取的机构侧已实现，"
+                "但决策引擎的 grip_done 契约仍假设一趟只套 1 个（会在套取途中下发 "
+                "TRANSPORT_TO 抢走导航目标）→ 实测比容量 1 更慢。请保持 1，"
+                "除非先完成决策引擎耦合改造（见 docs/audit/FIXES.md 的 S-40）")
+
+        # ── 本趟**实际**装在车上的目标（S-40 的核心状态）──
+        # 旧实现用 `_current_targets`（= 本趟**计划**）当"已装载"，于是车只开到
+        # 第 1 个目标就把计划里的全部目标一次性记入货舱 → 软件认为满载 3 个、
+        # 实际只带 1 个：计分虚高、另外 2 个目标留在原地被下一轮重复选中。
+        # 现在严格区分：`_current_targets` = 本趟计划（用于导航/规则校验），
+        # `_captured` = 真正套住并记入装载的目标（用于投放判定与计分）。
+        self._captured: List[TrackedTarget] = []
+        self._capture_index = 0     # 当前正在前往/套取的是计划里的第几个目标
+        # 上一趟**真正**送达的目标（S-40）：决策引擎据此只把"确实送到了"的目标
+        # 标记为已入安全区；本趟计划里没套上的目标必须留在场上待下一趟重选，
+        # 否则会被当成已运走 → 永远不再选中 → 永久丢分。
+        self._last_delivered: List[TrackedTarget] = []
 
         # 套取失败重试（抬爪 + 后退 + 重新接近），超过次数才放弃本趟
         self._capture_retries = 0
+        self._violation = Violation.NONE      # 本趟违规类型（用于 VIOLATION 自恢复日志）
 
         # 注入项（由 AutonomousState 绑定真机硬件）：
         self._stop_cb = None        # 显式停车回调（套取前必须让底盘真停）
@@ -129,6 +157,20 @@ class TransportPipeline:
     @property
     def placer(self) -> SafeZonePlacer:
         return self._placer
+
+    @property
+    def delivered_target_ids(self) -> List[int]:
+        """上一趟**真正**送达的目标 id（S-40：计划 ≠ 实际装载）。
+
+        决策引擎在"投放完成"时只能给这些 id 标记入安全区；本趟计划里因机构容量
+        限制没套上的目标仍留在场上，必须留给下一趟重新选择。
+        """
+        return [t.id for t in self._last_delivered]
+
+    @property
+    def sleeve_max_hold(self) -> int:
+        """本车套取机构一趟最多能真正套住的个数（默认 1，见 config.Placement）。"""
+        return self._sleeve_max_hold
 
     @property
     def compute_approach(self, robot_pose, target):
@@ -173,6 +215,10 @@ class TransportPipeline:
     MAX_CAPTURE_RETRIES = 3
     #: 套取失败的后退距离（mm）：退开一点再重新对位，避免在同一个位置反复失败
     RETREAT_MM = 120.0
+    #: 判定"车已到位、可以把该目标记入装载"的距离阈值（mm）。
+    #: ⚠️ 这是 S-40 防线的关键：只有车真的在该目标处才允许记入，
+    #:    绝不"隔着几米把没套到的目标算作已送达"。
+    CAPTURE_RADIUS_MM = 150.0
 
     def is_idle(self) -> bool:
         return self._phase in (TransportPhase.IDLE, TransportPhase.COMPLETE)
@@ -220,12 +266,16 @@ class TransportPipeline:
 
         不放弃整趟转运（旧实现直接 IDLE + 清空目标，等于整趟白跑）。
         """
-        self._sleeve.raise_up()
+        # ⚠️ 槽内**已有**目标时绝不能抬爪（抬爪 = 释放）：一抬就把先前套住的目标
+        #    放回场地，而 `_captured` 仍认为在车上 → 又变成"记分虚高"。此时只后退。
+        if not self._captured:
+            self._sleeve.raise_up()
         if not self._current_targets or nav is None:
             # 无法规划后退（无导航/无目标）→ 原地重新接近重试
             self._phase = TransportPhase.APPROACHING
             return
-        tx, ty = self._current_targets[0].position[0], self._current_targets[0].position[1]
+        idx = min(self._capture_index, len(self._current_targets) - 1)
+        tx, ty = self._current_targets[idx].position[0], self._current_targets[idx].position[1]
         dx, dy = rx - tx, ry - ty
         norm = (dx * dx + dy * dy) ** 0.5
         if norm < 1e-3:
@@ -253,7 +303,9 @@ class TransportPipeline:
         Returns:
             (ok, violation)
         """
-        if not self.is_idle:
+        # ⚠️ 旧实现写成 `if not self.is_idle:`（漏了括号）→ 方法对象恒为真 →
+        # `not ...` 恒 False → 守卫形同虚设，正在转运时还能二次 start_trip。
+        if not self.is_idle():
             logger.warning(f"无法开始转运：当前阶段={self._phase.name}")
             return (False, Violation.NONE)
 
@@ -263,12 +315,22 @@ class TransportPipeline:
         if not ok:
             consequence, is_fatal = self._load_mgr.get_violation_info(violation)
             logger.error(f"转运违规: {violation.name} — {consequence}")
+            self._violation = violation
             self._phase = TransportPhase.VIOLATION
             return (False, violation)
 
         self._current_targets = targets
+        # S-40：本趟"计划"与"实际装载"必须分开记账（详见 __init__ 注释）
+        self._captured = []
+        self._capture_index = 0
         self._phase = TransportPhase.APPROACHING
         self._planning_trip = True
+        # 复位本趟投放/重试状态：否则第 2 趟起 _place_started 仍为 True，
+        # 会跳过"推入斜坡 + 分步上调"直接释放（Mock 看不出，真机必错位）
+        self._place_started = False
+        self._place_step = 0
+        self._capture_retries = 0
+        self._confirm_fail_streak = 0
 
         names = [t.info.description for t in targets]
         logger.info(f"开始转运 (第{self._load_mgr.trip_number}趟): "
@@ -288,12 +350,33 @@ class TransportPipeline:
         """
         rx, ry, rtheta = robot_pose
 
+        # ── 违规阶段自恢复 ──
+        # 旧实现：进入 VIOLATION 后既不在 is_idle() 集合里、也没有任何出口
+        # → start_trip 永远被拒 → 之后所有 GRIP 被静默丢弃 → 整场不动。
+        # 规则上"违规"只是**本次转运无效**（见 VIOLATION_CONSEQUENCES），
+        # 因此这里作废本趟、清空目标、回到 IDLE，让上层重新规划。
+        if self._phase == TransportPhase.VIOLATION:
+            consequence, _ = self._load_mgr.get_violation_info(self._violation)
+            logger.error(f"本次转运作废（{self._violation.name}: {consequence}）→ "
+                         f"清空本趟目标，回到 IDLE 重新规划")
+            self._current_targets.clear()
+            self._captured.clear()
+            self._capture_index = 0
+            self._last_delivered = []   # 作废的趟次不算送达
+            self._place_started = False
+            self._place_step = 0
+            self._capture_retries = 0
+            self._phase = TransportPhase.IDLE
+            return self._get_status()
+
         if self._phase == TransportPhase.APPROACHING:
-            # 接近目标
+            # 接近目标：注意用 `_capture_index` 取"当前这一趟要套的那一个"，
+            # 不能用 [0]（多目标逐个套取时会把车反复拉回第 1 个目标）。
             if self._current_targets and nav:
-                target = self._current_targets[0]
+                target = self._current_targets[
+                    min(self._capture_index, len(self._current_targets) - 1)]
                 dist = self._distance((rx, ry), target.position)
-                if dist < 150:  # 到达套取范围
+                if dist < self.CAPTURE_RADIUS_MM:  # 到达套取范围
                     self._phase = TransportPhase.CAPTURING
                     # 显式停车：清导航目标 + 立即下发停车，保证套取全程底盘静止
                     self._halt_for_capture(nav)
@@ -301,59 +384,107 @@ class TransportPipeline:
                 # 否则导航继续（由 autonomous loop 调用 nav 完成）
 
         elif self._phase == TransportPhase.CAPTURING:
-            # 下降套取
-            if not self._sleeve.is_holding():
-                # 升起复位
+            # ── 逐个套取（S-40）──
+            # 旧实现：进入 CAPTURING 的唯一条件是"距**第 1 个**目标 <150mm"，然后
+            # `for t in self._current_targets: load(t)` 把**整趟计划**一次性记入货舱，
+            # 中间没有任何"逐个目标前往并分别套取"的状态转移 → 车只到过第 1 个目标，
+            # 软件却认为 3 个都装上了。规则判的是真送达，所以这是纯虚高分。
+            # 现在：只对"当前这一个"（`_capture_index`）做套取与记入，
+            #       且记入前必须复核车确实在该目标处（距 > CAPTURE_RADIUS_MM 直接打回重接近）。
+            if self._capture_index >= len(self._current_targets):
+                # 兜底：计划已处理完却没转移阶段（理论上不可达）
+                self._phase = TransportPhase.TRANSPORTING
+                return self._get_status()
+
+            target = self._current_targets[self._capture_index]
+            dist = self._distance((rx, ry), target.position)
+            if dist > self.CAPTURE_RADIUS_MM:
+                logger.warning(
+                    f"套取位姿复核不通过：距目标#{target.id} {dist:.0f}mm > "
+                    f"{self.CAPTURE_RADIUS_MM:.0f}mm → 回到接近阶段重新对位"
+                    f"（绝不隔着距离把没套到的目标记入装载）")
+                self._phase = TransportPhase.APPROACHING
+                return self._get_status()
+
+            # 升起复位（槽内已有目标时**不能抬爪**：抬爪即释放）
+            if not self._captured:
                 self._sleeve.raise_up()
-                # 构建目标位置
-                positions = {t.id: t.position for t in self._current_targets}
-                # 下降套住
+            # 只把**当前这一个**目标的位置交给机构：机构据"槽下方有什么"判定套取，
+            # 传整趟计划等于让机构凭空套住不在跟前的目标（本次修复的根因）。
+            positions = {target.id: target.position}
+            if self._captured:
+                success = self._sleeve.lower(positions)
+            else:
                 success = self._sleeve.lower_with_retry(positions, max_retries=3)
-                # 无硬件"套住检测"→ 用摄像头确认 U 型槽里确实套住了目标。
-                # 不可靠的确认（异常）按成功处理，避免误判导致无休止重试。
-                if success and self._sleeve_confirm is not None:
-                    try:
-                        confirmed = bool(self._sleeve_confirm())
-                    except Exception as e:
-                        logger.warning(f"套取视觉确认异常({e})，按成功处理")
-                        confirmed = True
-                    if not confirmed:
-                        self._confirm_fail_streak += 1
-                        # 失效保护：一直"确认不了"通常说明 ROI 没标定 or 摄像头看不到槽，
-                        # 此时自动关闭确认，避免机器人卡在"失败→重试→放弃"的死循环里。
-                        if self._confirm_fail_streak >= self.MAX_CONFIRM_FAILS:
-                            logger.error(
-                                f"视觉确认连续 {self._confirm_fail_streak} 次判失败 → 自动关闭视觉确认；"
-                                "请检查 Camera.SLEEVE_ROI 是否已按真机标定")
-                            self._sleeve_confirm = None
-                        logger.warning("视觉确认：U 型槽内未见目标 → 判为套取失败，将抬爪后退重试")
-                        success = False
-                    else:
-                        self._confirm_fail_streak = 0
-                if success:
-                    for t in self._current_targets:
-                        ok, v = self._load_mgr.load(t.info, t.id)
-                        if not ok:
-                            self._phase = TransportPhase.VIOLATION
-                            return self._get_status()
-                    self._phase = TransportPhase.TRANSPORTING
-                    self._capture_retries = 0
-                    logger.info("套取完成，开始运送")
-                else:
-                    # 套取失败：不立刻放弃整趟 —— 抬爪 + 后退一小段 + 重新接近重试
-                    self._capture_retries += 1
-                    if self._capture_retries <= self.MAX_CAPTURE_RETRIES:
-                        logger.warning(
-                            f"套取失败({self._capture_retries}/{self.MAX_CAPTURE_RETRIES})："
-                            "抬起夹爪 → 后退 → 重新接近重试")
-                        self._begin_retreat(rx, ry, rtheta, nav)
-                    else:
+            # 无硬件"套住检测"→ 用摄像头确认 U 型槽里确实套住了目标。
+            # 不可靠的确认（异常）按成功处理，避免误判导致无休止重试。
+            if success and self._sleeve_confirm is not None:
+                try:
+                    confirmed = bool(self._sleeve_confirm())
+                except Exception as e:
+                    logger.warning(f"套取视觉确认异常({e})，按成功处理")
+                    confirmed = True
+                if not confirmed:
+                    self._confirm_fail_streak += 1
+                    # 失效保护：一直"确认不了"通常说明 ROI 没标定 or 摄像头看不到槽，
+                    # 此时自动关闭确认，避免机器人卡在"失败→重试→放弃"的死循环里。
+                    if self._confirm_fail_streak >= self.MAX_CONFIRM_FAILS:
                         logger.error(
-                            f"套取连续 {self.MAX_CAPTURE_RETRIES} 次失败：放弃本趟转运")
-                        self._capture_retries = 0
-                        self._phase = TransportPhase.IDLE
-                        self._current_targets.clear()
-            # 已套住时继续
+                            f"视觉确认连续 {self._confirm_fail_streak} 次判失败 → 自动关闭视觉确认；"
+                            "请检查 Camera.SLEEVE_ROI 是否已按真机标定")
+                        self._sleeve_confirm = None
+                    logger.warning("视觉确认：U 型槽内未见目标 → 判为套取失败，将抬爪后退重试")
+                    success = False
+                else:
+                    self._confirm_fail_streak = 0
+            if success:
+                # 只记入**这一个**目标（数量、计分都以 `_captured` 为准）
+                ok, v = self._load_mgr.load(target.info, target.id)
+                if not ok:
+                    self._violation = v
+                    self._phase = TransportPhase.VIOLATION
+                    return self._get_status()
+                self._captured.append(target)
+                self._capture_index += 1
+                self._capture_retries = 0
+                logger.info(
+                    f"已套取并记入装载 {len(self._captured)} 个（目标#{target.id} "
+                    f"{target.info.description}）")
+                # 槽容量还够 + 计划里还有目标 → 去下一个；否则直接运送
+                if (self._capture_index < len(self._current_targets)
+                        and len(self._captured) < self._sleeve_max_hold):
+                    nxt = self._current_targets[self._capture_index]
+                    logger.info(
+                        f"槽容量 {self._sleeve_max_hold}，继续前往下一个目标"
+                        f"#{nxt.id} @({nxt.position[0]:.0f}, {nxt.position[1]:.0f})")
+                    self._phase = TransportPhase.APPROACHING
+                    if nav is not None:
+                        nav.set_target(*nxt.position)
+                else:
+                    skipped = len(self._current_targets) - self._capture_index
+                    if skipped > 0:
+                        logger.warning(
+                            f"本趟计划 {len(self._current_targets)} 个，但套取机构一趟只能"
+                            f"真正套住 {self._sleeve_max_hold} 个 → 本趟只送 "
+                            f"{len(self._captured)} 个；剩余 {skipped} 个目标留在场上，"
+                            f"由下一趟重新选择（已从'已装载'中排除，不计分）")
+                    self._phase = TransportPhase.TRANSPORTING
+                    logger.info(f"套取完成（实际套住 {len(self._captured)} 个），开始运送")
+            else:
+                # 套取失败：不立刻放弃整趟 —— 抬爪 + 后退一小段 + 重新接近重试
+                self._capture_retries += 1
+                if self._capture_retries <= self.MAX_CAPTURE_RETRIES:
+                    logger.warning(
+                        f"套取失败({self._capture_retries}/{self.MAX_CAPTURE_RETRIES})："
+                        "抬起夹爪 → 后退 → 重新接近重试")
+                    self._begin_retreat(rx, ry, rtheta, nav)
+                else:
+                    logger.error(
+                        f"套取连续 {self.MAX_CAPTURE_RETRIES} 次失败：放弃本趟转运")
+                    self._capture_retries = 0
+                    self._phase = TransportPhase.IDLE
+                    self._current_targets.clear()
+                    self._captured.clear()
 
         elif self._phase == TransportPhase.RETREAT:
             # 已抬爪后退 → 到位后重新接近同一目标，再试一次套取
@@ -401,8 +532,16 @@ class TransportPipeline:
                 return self._get_status()   # 未释放，等待下一帧继续推+上调
 
             # 步伐走完 → 投放判定 + 释放
-            positions = [(rx, ry)] * len(self._current_targets)
-            infos = [t.info for t in self._current_targets]
+            # ⚠️ 必须按**目标实际落点**判定，不能用车身位置：
+            # 目标在车头 U 型槽内（前伸 L≈DROP_FORWARD_MM），释放瞬间它落在车身前方，
+            # 用 (rx,ry) 判会系统性偏移一个 L —— 投对了被判无效（丢分/首趟失败），
+            # 投错了被判有效（首趟"假成功"→ 按规则后续全部无效）。
+            drop_pt = self.drop_position((rx, ry, rtheta))
+            # S-40：投放判定/计分只针对**真正装在车上**的目标（`_captured`），
+            # 不是本趟计划。用计划会让"没带上的目标"也按投对计分（虚高分）。
+            dropped = self._captured or list(self._current_targets)
+            positions = [drop_pt] * len(dropped)
+            infos = [t.info for t in dropped]
             results = self._placer.classify_batch(positions, infos)
             all_valid = all(r.is_valid for r in results)
 
@@ -414,7 +553,7 @@ class TransportPipeline:
             if released:
                 self._load_mgr.release_all(placement_ok=all_valid)
                 self._total_trips += 1
-                self._total_targets_delivered += len(self._current_targets)
+                self._total_targets_delivered += len(dropped)
                 self._total_score = self._load_mgr.total_score
 
                 if not all_valid:
@@ -423,7 +562,11 @@ class TransportPipeline:
                         logger.warning(f"投放位置错误: {r.detail}")
 
                 self._phase = TransportPhase.COMPLETE
+                # 记住"本趟真正送达了什么"，供决策引擎精确标记（只标真的送到的）
+                self._last_delivered = list(dropped)
                 self._current_targets.clear()
+                self._captured.clear()
+                self._capture_index = 0
 
                 logger.info(f"转运完成: 得分={self._total_score}, "
                              f"累计={self._total_targets_delivered}个")
@@ -455,6 +598,17 @@ class TransportPipeline:
     def reset(self) -> None:
         self._phase = TransportPhase.IDLE
         self._current_targets.clear()
+        self._captured = []
+        self._capture_index = 0
+        self._last_delivered = []
+        self._place_started = False
+        self._place_step = 0
+        self._capture_retries = 0
+        self._confirm_fail_streak = 0
+        self._violation = Violation.NONE
+        self._total_trips = 0
+        self._total_targets_delivered = 0
+        self._total_score = 0
         self._load_mgr.reset()
         self._sleeve.raise_up()
 
@@ -465,6 +619,20 @@ class TransportPipeline:
         )
 
     # ---- 工具 ----
+
+    def drop_position(self, pose: Tuple[float, float, float]) -> Tuple[float, float]:
+        """
+        由车身位姿推算**目标落点**：车心 + 槽内前伸距离 L 沿朝向方向。
+
+            drop = (x + L·cosθ, y + L·sinθ)
+
+        L = `config.Placement.DROP_FORWARD_MM`（真机标定项，YAML 可改）。
+        投放有效性判定必须用这个点，而不是车身位置。
+        """
+        import math
+        x, y, theta = pose[0], pose[1], pose[2]
+        L = float(getattr(cfg_placement, "DROP_FORWARD_MM", 150.0))
+        return (x + L * math.cos(theta), y + L * math.sin(theta))
 
     @staticmethod
     def _distance(p1: Tuple[float, float],
@@ -561,7 +729,7 @@ if __name__ == "__main__":
     # --- 测试 4：伤员必须单独 ---
     print("\n测试 4: 装载 2 个伤员 → 违规")
     tp.reset()
-    tp._load_mgr._total_trips = 1  # 绕过首次检查
+    tp._load_mgr.mark_first_trip_done()  # 显式跳过首趟（自测用）
     i1 = TrackedTarget(id=7, info=injured_info, position=(500, 500))
     i2 = TrackedTarget(id=8, info=injured_info, position=(600, 500))
     ok, v = tp.start_trip([i1, i2])
@@ -573,7 +741,7 @@ if __name__ == "__main__":
     # --- 测试 5：超 3 个 → 违规 ---
     print("\n测试 5: 装载 4 个 → 违规")
     tp.reset()
-    tp._load_mgr._total_trips = 1
+    tp._load_mgr.mark_first_trip_done()
     targets_4 = [
         TrackedTarget(id=10+i, info=regular_info, position=(500+i*50, 500))
         for i in range(4)

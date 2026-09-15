@@ -100,13 +100,17 @@ class AnomalyHandler:
 
     def check(self,
               robot_pose: Tuple[float, float, float],
-              velocity: Tuple[float, float],
+              velocity: Optional[Tuple[float, float]] = None,
               imu_data: Optional[dict] = None,
               contact_duration_s: float = 0.0,
               sensor_status: Optional[Dict[str, bool]] = None) -> AnomalyReport:
         """
         综合异常检测。
 
+        Args:
+            robot_pose: (x, y, theta)
+            velocity: **实际**速度 (vx, vy) mm/s（由里程计位姿差算出）。
+                None = 上游没有运动学信息 → 跳过"无动作"检测（绝不凭猜测判无动作）。
         Returns:
             AnomalyReport: 异常报告（无异常时 type=NONE）
         """
@@ -115,31 +119,34 @@ class AnomalyHandler:
 
         timestamp = time.time()
         rx, ry, rtheta = robot_pose
-        vx, vy = velocity
 
-        # 1. 15 秒无动作检测
-        speed = math.sqrt(vx ** 2 + vy ** 2)
-        idle_s = timestamp - self._last_action_time
-        if speed > 10:  # 有动作
-            self._last_action_time = timestamp
-        elif idle_s > self.WATCHDOG_TIMEOUT_S:
-            return self._report(
-                AnomalyType.NO_ACTION_15S,
-                "无动作 %.1fs → 保命模式" % idle_s,
-                RecoveryAction.EMERGENCY_STOP, False,  # 不再fatal!
-            )
-        elif idle_s > self.WATCHDOG_CRITICAL_S:
-            return self._report(
-                AnomalyType.NO_ACTION_15S,
-                "无动作 %.1fs → 保命预警" % idle_s,
-                RecoveryAction.ESCAPE_MANEUVER, False,
-            )
-        elif idle_s > self.WATCHDOG_WARN_S:
-            return self._report(
-                AnomalyType.NO_ACTION_15S,
-                "无动作 %.1fs → 探索预警" % idle_s,
-                RecoveryAction.ESCAPE_MANEUVER, False,
-            )
+        # 1. "无动作"检测（仅在拿到真实速度反馈时启用）
+        # 旧实现由调用方传字面量 (0,0) → speed 恒 0；且调用方每帧 notify_action()
+        # 刷新计时 → 这一段永远不触发，整条保活链形同虚设。现已改为由上游传实际速度。
+        if velocity is not None:
+            vx, vy = velocity
+            speed = math.sqrt(vx ** 2 + vy ** 2)
+            idle_s = timestamp - self._last_action_time
+            if speed > 10:  # 确实在动
+                self._last_action_time = timestamp
+            elif idle_s > self.WATCHDOG_TIMEOUT_S:
+                return self._report(
+                    AnomalyType.NO_ACTION_15S,
+                    "无动作 %.1fs → 保命模式" % idle_s,
+                    RecoveryAction.EMERGENCY_STOP, False,  # 不再fatal!
+                )
+            elif idle_s > self.WATCHDOG_CRITICAL_S:
+                return self._report(
+                    AnomalyType.NO_ACTION_15S,
+                    "无动作 %.1fs → 保命预警" % idle_s,
+                    RecoveryAction.ESCAPE_MANEUVER, False,
+                )
+            elif idle_s > self.WATCHDOG_WARN_S:
+                return self._report(
+                    AnomalyType.NO_ACTION_15S,
+                    "无动作 %.1fs → 探索预警" % idle_s,
+                    RecoveryAction.ESCAPE_MANEUVER, False,
+                )
 
         # 2. 失控检测（IMU 异常）
         if imu_data:
@@ -172,9 +179,10 @@ class AnomalyHandler:
                 RecoveryAction.DEGRADE_SENSORS, False,
             )
 
-        # 4. 卡死检测
+        # 4. 卡死检测（"电机在转但位置不变"）——需要真实速度反馈才能判定，
+        #    没有 velocity 时跳过，避免用未知信息误判。
         current_pos = (rx, ry)
-        if self._last_position is not None:
+        if velocity is not None and self._last_position is not None:
             dist = math.sqrt(
                 (current_pos[0] - self._last_position[0]) ** 2 +
                 (current_pos[1] - self._last_position[1]) ** 2
