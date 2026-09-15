@@ -15,8 +15,13 @@
 
 | 阶段 | score | delivered | valid | 说明 |
 |---|---|---|---|---|
-| 初始基线 | 105 | 12/14 | 12 | 其中相当一部分是"一趟带 3 个但只去过第 1 个"的**虚高** |
-| 当前 | 70 | 7/14 | 7 | 由 `Placement.SLEEVE_MAX_HOLD=1`（一趟只带 1 个）修正后，**7 个全部有效** |
+| 初始基线 | 105 | 12/14 | 12 | 其中 5 个是"一趟带 3 个但只去过第 1 个"的**虚高**（S-40） |
+| 当前（队长 S-40 修完后） | **80**（5 种子 80/80/85/80/80，均值 81） | **7/14** | **7** | 一趟只真正带走 1 个，**valid 全等 delivered**，0 扣分 0 异常 |
+
+> ⚠️ **S-40 说明（重要，防误判为性能回归）**：修复"多目标假装载"后仿真分数从 105 降到 80，
+> 这是**去虚高的必然结果，不是性能回归**。旧数字里 12 个"送达"中有 5 个是机器人**从未到达**
+> 第 2/3 个目标却按已送达记账。真机意义：旧代码会向裁判/自评谎报成绩，且那 5 个目标会被永久
+> 移出候选（`mark_in_safe_zone`）→ 再也不会去取，**真实丢分**。
 
 `SLEEVE_MAX_HOLD` 由另一名成员接线（`config.py` / `transport_pipeline.py:112`），
 不是本文件修复项；本节只记录"为什么数字变了"，避免被误判为回归。
@@ -208,3 +213,66 @@ PYTHONPATH=src python3 tools/fix_verifiers/run_all.py
 | `python3 -m rescue_robot.transport.transport_pipeline` | 全部通过 |
 | `python3 tools/hw_selftest.py --mock` | **PASS=6 FAIL=0 SKIP=7** |
 | 集成仿真 5 种子 | score 70~80 / delivered 7/14 / **valid 7**（见文件开头基准变更说明） |
+
+
+---
+
+## 五、本轮追加修复（S-40 复查 / S-NEW / N-1 / 改进项 ① / release_valid 兼容）
+
+### 11. S-NEW 越界目标被静默夹紧 —— 已修（test-author 评审发现）
+- **文件**：`navigation/navigation_pipeline.py`（`set_target()`，新增 `_rejected_targets` 计数）
+- **为什么**：`CostMap._to_grid` 会把越界坐标（如 (9000,9000)）clamp 进网格 → A* 返回
+  `success=True` → 上层以为规划成功并判"到达"，而 `is_in_field()` 为 False
+  → "给了个场外目标"变成"看起来正常却永远走不到"的幽灵任务。
+- **改法**：`set_target()` 两道闸门——① 越界（<0 或 >3000）**显式拒绝**：返回 `False`、
+  保持原目标、打 WARNING 并计数；② 落在 hard 禁区内仍按原设计钳制到最近合法点。
+- **验证**：`tools/fix_verifiers/verify_p1_5_forbidden_zones.py` → **10/10**
+  （越界 (9000,9000)/(-500,1500) 均被拒绝且未改目标；合法点 2000 次采样 100% 不变）。
+
+### 12. N-1 `speed` 未初始化（velocity=None 时潜在 NameError）—— 已加固
+- **文件**：`decision/anomaly_handler.py`
+- **现状核验**：传入 `velocity=None`、`(0,0)`、`(300,0)` 三种调用**均已不崩溃**
+  （卡死检测此前已被放进 `velocity is not None` 守卫内）。
+- **改法**：仍按队长要求补 `speed = 0.0` **兜底初始化**（零风险防御，防止日后有人把判断挪出守卫）。
+- **验证**：三种调用探针全通过；`decision.update()`（默认 velocity=None）不崩溃。
+
+### 13. 改进项 ① 取消"伤员绝对优先"，改按**价值密度**取舍 —— 已实现（容量感知）
+- **文件**：`decision/target_selector.py`（`select_targets_for_trip` + 新增 `_trip_time_s` /
+  `_value_density` / `_effective_capacity`）
+- **为什么**：旧实现只要场上有伤员就**永远**只送最近的那个伤员，普通/核心物资一个都不选
+  （决赛配比实测：10 普通 + 5 核心原封不动）。改为比较单位时间价值：
+  伤员 `15/(overhead+2d/v)` vs 物资趟 `Σ分值/(overhead+(d0+簇内跨度+300)/v)`，
+  `overhead=9s`、`v=880mm/s`（对 overhead 不敏感）。
+- **关键实现细节（容量感知）**：候选簇规模取 `min(max_count, Placement.SLEEVE_MAX_HOLD)`。
+  物理容量=1 时**不得**把"3 个 5 分物资"估成 15 分/趟（会把 15 分的伤员饿死）；
+  容量≥2 时才评估多目标簇。
+- **A/B 实测（2 种子 × 3 场景，`tools/fix_verifiers/measure_delivery_rate.py`）**：
+  | 场景 | 改前 送达/得分 | 改后（容量=1）送达/得分 |
+  |---|---|---|
+  | 默认局（12 可得分） | 7.0 个 / 80.0 | 7.0 个 / 80.0 |
+  | 初赛配比 8普/4核/4伤 | 7.5 个 / 90.0 | 7.5 个 / 90.0 |
+  | 决赛配比 10普/5核/5伤 | 8.0 个 / 100.0 | 8.0 个 / 100.0 |
+  → **当前物理容量=1 时中性（无退化、暂无增益）**：因为一趟只能带 1 个，伤员 15 分/趟的密度
+  本身就最高。该改动是"决策不再自锁"的正确性修复，收益在容量≥2 时才兑现
+  （⚠️ 容量=3 的对照臂因队长正在改的 S-40 第二半处于半成品状态，本机实测不可用，未采信）。
+- **验证**：`compileall` OK；5 种子默认局 80/7/7 不变；`run_all.py` 6/6；
+  `hw_selftest --mock` PASS=7 FAIL=0 SKIP=7。
+
+### 14. `release_valid` 改为 None=旧行为（自测兼容）—— 已修
+- **文件**：`decision/decision_engine.py`（签名 3 处 + 两处判定前）
+- **为什么**：B3 引入 `release_valid`（默认 False）后，模块自带 `__main__` 自测未传该参数
+  → 首趟被判无效 → 自测"测试 4"失败（契约要求各模块 `__main__` 自测通过）。
+- **改法**：`release_valid: Optional[bool] = None`，`None` 视为"本趟计划有效送达"
+  —— 与队长给 `delivered_ids` 定的 None 语义一致；真机路径
+  （`autonomous_state` / `integrated_sim`）仍显式传真实布尔值，闸门照常生效。
+- **验证**：`python3 -m rescue_robot.decision.decision_engine` → 决策引擎测试全部通过。
+
+---
+
+## 六、待现场标定（补充）
+
+| 项 | 位置 | 现场动作 |
+|---|---|---|
+| **浅蓝 vs 蓝 的 HSV 区分** | `perception/detection.py::HSV_RANGES` | ⚠️ **必须现场标定**：两者的 H/S 区间本质重叠，当前只靠「① 检测顺序（LIGHT_BLUE 先）+ ② 分类器禁止任何颜色容差命中 DANGEROUS」两道闸门区分。若决赛现场公布的蓝/浅蓝无法区分，用 `tools/vision_calibration.py` 标定后改这两个区间（与 B13"颜色运行时配置"同源） |
+| 套取机构物理容量 | `config.Placement.SLEEVE_MAX_HOLD`（默认 1） | 由机构组确认；**调大前必须先跑 `measure_delivery_rate.py` + 5 种子回归**（决策引擎 grip_done 耦合需同步确认） |
+| 趟次开销/巡航速度（价值密度模型） | `decision/target_selector.py::TRIP_OVERHEAD_S / NOMINAL_SPEED_MM_S` | 现场实测一趟平均耗时与巡航速度后填（对结果不敏感，9~14s 结论一致） |

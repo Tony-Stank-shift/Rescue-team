@@ -30,7 +30,7 @@ PYTHONPATH=src python3 tools/hw_selftest.py --list
 
 | 开关 | 作用 | 什么时候用 |
 |---|---|---|
-| `--list` | 列出 13 个模块名与覆盖内容 | 忘了模块名时 |
+| `--list` | 列出 14 个模块名与覆盖内容 | 忘了模块名时 |
 | `--only a,b` | 只跑指定模块 | 已知大概哪个板块坏了，单点复现 |
 | `--mock` | 明确声明"现在没硬件" → 环境相关项按 **SKIP** 而不是 FAIL | 开发机、赛前桌面演练 |
 | `--yes-motion` | 允许驱动电机（**必须先架起轮子离地**） | 测里程计符号 / 电机 / 速度环 |
@@ -79,18 +79,19 @@ PYTHONPATH=src python3 tools/hw_selftest.py --list
 
 ---
 
-## 3. 13 个模块：测什么 / 判定 / 失败怎么办
+## 3. 14 个模块：测什么 / 判定 / 失败怎么办
 
 排障顺序即模块执行顺序（从纯算法 → 链路 → 硬件）：
-`ranging → decision → navigation → transport → serial → telemetry → start_button →
-servo → odometry → motors → velocity → camera → vision`
+`ranging → decision → navigation → transport → accounting → serial → telemetry →
+start_button → servo → odometry → motors → velocity → camera → vision`
 
 | 模块 | 测什么 | PASS 判定 | FAIL 典型原因与处置 |
 |---|---|---|---|
 | `ranging` | 视觉测距（底边+倾角地平面法）公式回环 + 倾角敏感性 | 200~3000mm 回环误差 <1% | 公式/参数接线错；`config.Camera` 与 `CVDetector` 参数不一致。**注意**：这只是公式自检，真实距离仍必须标定 `TILT_DEG` |
-| `decision` | 载规则：首次单独 1 个普通物资 / 单次 ≤3 / 伤员必须单独 / 危险目标必须拒绝 / 空批次不崩 | 全部规则判定正确 | 违规项**直接丢分**：查 `LoadManager.can_load_batch` 的判定顺序（历史 bug：`[普通,伤员]` 会漏判成 NONE）。另：`start_trip` 的 `if not self.is_idle:` 恒真，见 `docs/audit/CODE_AUDIT.md` S-02 |
-| `navigation` | 从出发区走到对角目标 / 异常目标不崩 | 能到达（残距 <80mm）且不抛异常 | 未到达：看 A*/纯追踪/到点判定；`BLOCKED` 看避障。**已知缺口**：目标落在对方安全区时会被静默改到 (1500,1500) 并报 ARRIVED（残距可达 1372mm）——该项判定待补 |
-| `transport` | 转运状态机全流程（Mock 夹爪）：APPROACHING→CAPTURING→TRANSPORTING→PLACING→COMPLETE | 流程走完 + 显式停车回调被调用 + 无 VIOLATION | 卡在中间阶段：看到点阈值/推入步骤；VIOLATION：载规则或投放判定。**已知**：S-40 多目标只到 1 个就全记账（见 CODE_AUDIT） |
+| `decision` | ①载规则：首次单独 1 个普通物资 / ≤3 / 伤员单独 / 危险拒绝 / 空批次不崩；②**B8** 场心误判；③**S-01** 终场停车（见 §10） | 规则判定正确 + B8 不误判不漏判 + DONE 后清目标/停车/退出 | 规则项**直接丢分**：查 `LoadManager.can_load_batch` 的判定顺序。S-01/B8 的处置见 §10.3 |
+| `navigation` | ①从出发区走到对角目标；②异常目标（场外/对方安全区）按**新契约**显式拒绝或钳制、不崩不冲进禁区 | 能到达（残距 <80mm）；场外坐标 `set_target` 返回 `False` 且不改原目标；禁区内目标被钳制到合法点 | 未到达：看 A*/纯追踪/到点判定。越界拒绝失效 → 查 `set_target` 是否用 `is_in_field()` 拒绝（旧行为=静默夹紧，见 §9.2） |
+| `transport` | 转运状态机全流程（Mock 夹爪）：APPROACHING→CAPTURING→TRANSPORTING→PLACING→COMPLETE | 流程走完 + 显式停车回调被调用 + 无 VIOLATION | 卡在中间阶段：看到点阈值/推入步骤；VIOLATION：载规则或投放判定 |
+| `accounting` | **S-40 载荷台账一致性**：计划≠实装必须被区分（台账/位姿复核/持有不抬爪，见 §10.2） | 台账数=实装数、只记真正套住的那个、隔 >150mm 不记账 | 台账虚高 → 分**虚高**；查 `CAPTURING` 分支的 `_capture_index`/`CAPTURE_RADIUS_MM`/`_captured` |
 | `serial` | 串口能否打开 + `PING→PONG` + `START→ACK,START` | 两者都收到 | 见 §4 串口四分类；能开但无 PONG → 下位机没跑/只接单向/未共地 |
 | `telemetry` | ODOM 8 字段@20Hz、IMU 10 字段@50Hz、TEL 字段数、数值合理性（az≈1000mg）、解析器一致性 | 帧前缀/字段数/频率/数值都对 | 见 §4；0 行：下位机没发数据或波特率不符 |
 | `start_button` | 一键启动：软件层 `read_button` 是否认得 `EVENT,START_BUTTON`；硬件层需 `HW_SELFTEST_INTERACTIVE=1` 人工按键 | 软件层识别成功 | 识别不了 → 现场按按钮不会进 AUTONOMOUS（查 `SerialChassis.read_button` 匹配前缀） |
@@ -163,7 +164,7 @@ servo → odometry → motors → velocity → camera → vision`
 
 ## 6. 实测输出（本机 WSL，无硬件，可直接对照）
 
-### 6.1 `--mock`（13 模块全跑，不崩）
+### 6.1 `--mock`（14 模块全跑，不崩）
 ```
   PASS=6  FAIL=0  SKIP=7
   ✅ 结论：未发现故障模块（部分模块因环境受限 SKIP）
@@ -254,26 +255,23 @@ PYTHONPATH=src python3 tools/hw_selftest.py --only <故障模块> --verbose
   ```
   `tools/hw_selftest/m_navigation.py` 用的就是这种写法（实测 954 步到达 (2694,2694)、
   残距 79mm、[PASS]）。
-- **相关**：目标落在**对方安全区内部**时，`nav.target` 会被静默改写成 (1500,1500)，
-  570 步后报 **ARRIVED**，而实际位置 (1472,1472) 距真实目标 **1372mm**。
-  现场表现为"车停在一个不是目标的地方且不再动"。用 `--only navigation --verbose` 看
-  `nav.target` 是否被改过。
 
-### 9.2 场外坐标被静默夹紧（A* 报成功，其实到不了）
+### 9.2 ~~场外坐标被静默夹紧（A* 报成功，其实到不了）~~ —— **已修复（2026-09-15，fixer）**
 
-- **现象**：`CostMap._to_grid` 会把超界坐标 clamp 进网格：`(9000, 9000)` → 网格 `(59,59)`
-  ≈ 场内 `(2975, 2975)`。于是 `AStarPlanner.plan` 返回 **`success=True`**，而
-  `ForbiddenZoneManager.is_in_field(9000,9000)` 明确返回 `False`，
-  `is_safe()` 返回 `True`、`clamp_to_safe()` 也不做夹紧。
-- **影响**：调用方以为"已规划到目标点"，实际车会跑到场内某个角落就停；**没有任何报错**。
-  现场表现是"规划成功但车没到位/停在奇怪的地方"。
-- **临时规避**（在 fixer 修掉 `_to_grid`/`set_target` 之前）：**调用方自己判**
-  ```python
-  if not nav.forbidden.is_in_field(tx, ty):
-      ...  # 视为不可达：上报并停住，不要 set_target
+- **原现象**：`CostMap._to_grid` 会把超界坐标 clamp 进网格：`(9000, 9000)` → 网格 `(59,59)`
+  ≈ 场内 `(2975, 2975)`，于是 `AStarPlanner.plan` 返回 **`success=True`**，而
+  `ForbiddenZoneManager.is_in_field(9000,9000)` 为 `False` → 上层以为"已规划到目标点"，
+  实际永远走不到，且没有任何报错。
+- **现状**：`NavigationPipeline.set_target` 已改为**返回 bool + 越界拒绝 + 禁区内钳制**
+  （契约存档：`docs/audit/S_NEW_NAV_TARGET_CONTRACT.md`）。自检 `navigation` 模块已按新契约
+  断言：场外坐标 → `set_target` 返回 `False` 且**不改动原目标**；禁区内坐标 → 返回 `True`
+  但目标被钳制到最近合法点。实测证据行 `[S-NEW]`：
   ```
-- **状态**：已确认属实并转给 fixer（低优先级小改动）。自检的 `navigation` 模块目前
-  **不判定这一条**（只判"不崩"），所以它现在会显示 PASS —— 别把它当"场外坐标没问题"。
+  场外坐标 (9000,9000)：set_target=False、target=None、400 步后停在 (150,150) ✓
+  对方安全区内部 (1500,100)：set_target=True、target=(1500.0, 1500.0) → 钳制到合法点 ✓
+  ```
+- **如果这里又出现 FAIL** → 说明静默夹紧的旧行为被改回来了：查 `set_target` 是否在赋值前
+  用 `is_in_field()` 拒绝。
 
 ### 9.3 已修复：`LoadManager` 伤员混装漏判（顺序相关）——**已确认修复**
 
@@ -284,3 +282,100 @@ PYTHONPATH=src python3 tools/hw_selftest.py --only <故障模块> --verbose
   `decision` 模块由 FAIL 转 **PASS**。
 - **现场动作**：无需动作。若你看到 `decision` 报 FAIL 的"伤员混装"项，说明这个修复被回退了
   —— 那是**直接丢分项**，优先处理。
+
+---
+
+## 10. 静默故障专项自查（S-40 / S-01 / B8）——**不报错、只会悄悄丢分或悄悄卡死**
+
+这三类缺陷**不会抛异常、不会停车、日志也看不出**，只会让分数悄悄变高、或让机器人悄悄卡在
+原地。自检把它们做成了可判 FAIL 的断言，且**纯逻辑、无硬件也必须真跑真判（绝不 SKIP）**。
+
+### 10.1 快速对照表
+
+| 现场症状 | 对应缺陷 | 跑哪个模块 | 判 FAIL 说明什么 |
+|---|---|---|---|
+| 自评/日志说"这趟送了 3 个"，实际场上只少了 1 个 | **S-40 多目标假装载** | `--only accounting` | 车没去过的目标被记进了货舱 → 分数虚高（赛项只认真送达） |
+| 车停在离目标很远的地方就开始"套取"、然后自称送到了 | **S-40 位姿复核** | `--only accounting` | 套取前没复核"车确实在该目标处"，隔着距离记账 |
+| 已经套住目标、后退重试后货物却掉在场上 | **S-40 抬爪丢货** | `--only accounting` | 持有目标时后退抬了爪（抬爪=释放） |
+| 比赛时间到后车还在朝场地里冲、或在安全区里打转 | **S-01 终场不停车** | `--only decision` | DONE 后没清导航目标 / 没发 STOP / 没退出主循环 |
+| 一趟送不到头、之后再也开不出新趟（一直在一个目标附近来回） | **B8 场心误判** | `--only decision` | 场心附近的**无关**目标被判成"投放无效"，把运送途中的导航目标抢走了 |
+
+一条命令同时看这三类：
+
+```bash
+PYTHONPATH=src python3 tools/hw_selftest.py --only accounting,decision
+```
+
+### 10.2 `accounting` 模块（新）——载荷台账一致性
+
+三条检查与判定：
+
+| 检查 | 构造 | PASS 判据 |
+|---|---|---|
+| A 台账 = 实装 | 本趟计划 3 个目标，车只开到第 1 个 | `load_manager.count == 1`、`_captured == 1`、货舱里**只有**那 1 个 id（旧 S-40 会记 3 个） |
+| B 位姿复核 | 车在 (2400,2500)、目标在 (400,400)（相距 **2900mm**），强制进入 CAPTURING | **不记入装载**（count=0）且被打回 `APPROACHING` 重新对位 |
+| C 持有不抬爪 | 已套住 1 个后触发后退重试 | `sleeve.raise_up()` 调用次数 **0**（抬爪=释放，会把货丢回场地） |
+
+实测证据行（本机 `--mock`，纯逻辑所以无硬件也真跑）：
+```
+[A] 车只到过第 1 个目标 (2400,2500)：load_manager.count=1、_captured=1、
+    _captured_ids=[1000]、target_ids={1000}、phase=TRANSPORTING
+[B] 车在 (2400,2500)、目标在 (400,400)（相距 2900mm）、强制 CAPTURING → count=0、phase=APPROACHING
+[C] 已持有 1 个目标后触发后退重试 → raise_up 被调用 0 次（应为 0）
+```
+
+**FAIL 时怎么处置**：
+1. 打开 `src/rescue_robot/transport/transport_pipeline.py` 的 `CAPTURING` 分支，确认：
+   ①`_capture_index` 是否**逐个**推进（不是永远取 `[0]`）；
+   ②`_load_mgr.load()` 是否只在 `sleeve.lower()` **成功之后**才调用；③记账对象是
+   `_captured`（实装）而**不是** `_current_targets`（整趟计划）。
+2. 位姿复核看 `TransportPipeline.CAPTURE_RADIUS_MM`（默认 `150.0`）：套取前
+   `dist > CAPTURE_RADIUS_MM` 必须打回 `APPROACHING`。现场若该值被调大（比如为了"好套一点"），
+   A/B 两条检查就会 FAIL —— 这正是要抓的情况。
+3. C 检查看 `_begin_retreat`：必须判 `self._captured` 非空时**只后退、不抬爪**。
+4. **现场交叉核对**（最直接）：跑完一趟，数一遍场上少了几个目标，与日志里"已套取并记入装载
+   N 个"对比；对不上就是台账在虚记。
+
+### 10.3 `decision` 模块（增补）——终场停车 + 场心误判
+
+| 检查 | 判据 | FAIL 含义 |
+|---|---|---|
+| B8-1/B8-2 无关目标靠近场心 | `_check_invalid_transport()` 返回 **False** | 判据太宽 → 运送途中导航目标被抢走，那一趟永远送不到 |
+| B8-3 已送达目标回到场心 | 返回 **True** | 漏判"投放无效" → 会一直以为已送达、不再补送 |
+| S-01-1 源码护栏 | `_run_once` 源码里含 `StrategyState.DONE` / `clear_target` / `_stop_chassis` / `_stop_event.set()` | 终场分支被改回去了 |
+| S-01-2 行为验证 | DONE 后：`clear_target` 被调 +1 次、`send_stop` ≥1 次、`send_velocity(0,0)` ≥1 次、停止事件已置位 | 比赛时间到后车还在冲 |
+
+实测证据行：
+```
+[B8-1] 没有已送达目标时、场心附近有无关目标 → 判无效=False（应 False）
+[B8-2] 无关目标就在场心附近 → 判无效=False（应 False）
+[B8-3] 我们送达过的目标回到场心 → 判无效=True（应 True）
+[S-01-1] _run_once 源码护栏：缺少 无（应全都有）
+[S-01-2] DONE 后：clear_target +1 次、send_stop 1 次、send_velocity(0,0) 1 次、退出主循环=True
+```
+
+**FAIL 时怎么处置**：
+- **S-01**：`AutonomousState._run_once` 的 DONE 分支必须依次做
+  `navigation.clear_target()` → `_stop_chassis()`（内部 `send_velocity(0,0)` + `send_stop`）
+  → `_stop_event.set()` → `return`。少任何一步，比赛结束时车都会继续以 50Hz 下发上一帧速度。
+  真机复现：手动把 `decision.strategy_state` 弄成 DONE（或等时间耗尽），看车是否立刻停。
+- **B8**：`DecisionEngine._check_invalid_transport` 必须**只遍历 `_delivered_ids`**
+  （我们送达过、又变回 ACTIVE 且出现在场心），不能遍历所有 ACTIVE 目标。旧实现就是遍历全场
+  → 决赛 25 个目标时常态误触发。
+
+### 10.4 故障注入验证（证明这两条真能判 FAIL）
+
+改坏代码后重跑，必须变 FAIL（本机实测）：
+
+```
+# ① 让记账成批写入（复现旧 S-40）
+_captured = list(targets)  →  accounting: [FAIL] 台账数与实装数不一致：
+                              load_manager.count=1 但实际套住 4 个 → 分数会虚高
+# ② 关掉位姿复核
+CAPTURE_RADIUS_MM = 1e9    →  accounting: [FAIL] 车距目标 2900mm 却把目标记入了装载
+# ③ 摘掉终场分支
+_run_once = lambda self, dt: None
+                           →  decision:   [FAIL] 终场不停车：决策引擎已 DONE 但导航目标没清
+```
+每条 FAIL 都带「↳ 处置」，直接告诉现场下一步查哪个文件/哪个常量。
+

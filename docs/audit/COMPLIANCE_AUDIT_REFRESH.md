@@ -1,5 +1,30 @@
 # 合规审计刷新：blocker / high 项在当前代码下的复核
 
+> ## ⛔ 本文件的复核结论表**已过期，请勿引用**
+>
+> **请改看 [`COMPLIANCE_AUDIT_REFRESH2.md`](./COMPLIANCE_AUDIT_REFRESH2.md)（权威版本）。**
+>
+> 本文件写于 `git diff --stat 0e8a5ae` 只显示 **6 个文件**被改动的时间点，当时本轮的修复
+> 还没进入工作区（其后共 16 个文件被改动，含 B1/B3/B4/B5/B6 的修复）。因此下面那张表里
+> 的「仍成立 / 0 条已修复」是**陈旧快照的结论**，其中至少 7 条已被证伪：
+>
+> | 本文件的判定 | 实际（当前工作区，见 REFRESH2） | 证据 |
+> |---|---|---|
+> | B1 仍成立（`main.py` 零改动、无 `set_start_pose` 调用） | **已修复** | `main.py:133-141` 读 `START_ZONE` 并校验 1~4；`:140` `StandardFieldLayout().get_start_pose()`；`:157-158` `chassis.set_start_pose(*start_pose)`；`main.py` 最后改动 = commit `e4cd2cb` |
+> | B3 VIOLATION 永久卡死仍成立 | **已修复** | `transport/transport_pipeline.py:354-356` 起为 VIOLATION 自恢复（作废本趟 → 清空 → 回 IDLE） |
+> | B4 投放判定用车身位置 | **已修复** | `transport_pipeline.drop_position()` + `config.Placement.DROP_FORWARD_MM`（YAML 可改） |
+> | B5/B6 识别误判 | **已修复** | 长宽比主判据 + 浅蓝优先检测 + 禁止容差命中 DANGEROUS；`tools/fix_verifiers/verify_b5b6_perception.py` 11/11 |
+> | B7 / S-40 多目标"假装抓到全部" | **已修复** | 计划(`_current_targets`)与实装(`_captured`)分离 + `CAPTURE_RADIUS_MM=150` 位姿复核 |
+> | B8 目标锁定被打断（判为潜伏） | **已修复**（队长判定为**高危**：会致整场一趟都送不到） | 改为按目标身份判定 + 持货时禁止重选；`tools/fix_verifiers/verify_s40_s01_team.py` |
+> | S-01 终场不停车 | **已修复** | `states/autonomous_state.py::_run_once` 顶部：决策引擎 `DONE` → 清导航目标 + `_stop_chassis()` + `_stop_event.set()` |
+>
+> **保留价值**：本文件的两块**新增内容仍然有效**，不受上述过期影响 ——
+> ① §通信层核验（"不可遥控"成立的原因不是锁得严，而是通信层压根没有"入站→运动"通道，
+> 且 `BLOCKED_IN_AUTONOMOUS` 只挡 `CONFIG_SET`/`COMMAND`）；
+> ② §需求侧硬约束附录（失控/碰撞保护未落地：`contact_duration_s` 调用侧恒 0、
+> `opponent_strategy.py` 全仓 0 引用、看门狗刻意不停车）。
+> 这两块的**行号**在 REFRESH2 里已按当前代码重新定位。
+
 - 任务：t11（req-auditor，attempt 2，attempt_id `a9791035-54e7-428b-8001-cdc38695e91d`）
 - 刷新时间基准：当前工作区（含未提交改动）`git diff --stat 0e8a5ae` 显示已改动 6 个文件
   （`decision/anomaly_handler.py`、`decision/decision_engine.py`、`navigation/forbidden_zones.py`、`navigation/navigation_pipeline.py`、`states/autonomous_state.py`、`transport/load_manager.py`）

@@ -60,7 +60,7 @@ sudo apt install -y python3-pip python3-opencv        # OpenCV 走 apt（RDK 上
 pip3 install pyserial pyyaml
 ```
 
-| 包 | 用途 | 代码里的引用 | 本机（开发机 WSL）实测版本 | 【待确认】 |
+| 包 | 用途 | 代码里的引用 | 本机（开发机 WSL）实测版本 | RDK X5 上待测 |
 |----|------|-------------|--------------------------|-----------|
 | `pyserial` | 串口 | `hardware/serial_chassis.py:75`（**延迟导入**，缺了也不崩，只是串口不可用） | 3.5 | RDK X5 上版本 |
 | `pyyaml` | 配置 | `innovation/config_loader.py:24`（缺了降级为 JSON，YAML 会解析失败） | 5.4.1 | RDK X5 上版本 |
@@ -102,13 +102,20 @@ python3 -c "import serial; s=serial.Serial('/dev/ttyS1',115200,timeout=0.2); pri
 | `Errno 16 Device or resource busy` | **被占用** | `sudo lsof /dev/ttyS1`、`sudo fuser -v /dev/ttyS1`；先停掉在跑的 `rescue_robot.main`、VSCode 串口监视器、`screen/minicom` |
 | 打开成功但收不到任何数据 | 权限对、**波特率/接线**错 | 见 §2 故障 F1/F2 |
 
-### 1.3 设备确权：`/dev/ttyS1` 到底是不是下位机
+### 1.3 设备确权：`/dev/ttyS1` = RDK X5 40PIN UART1 —— **已实测确认**
 
-`CHASSIS_PORT` 的**代码默认值是 `/dev/ttyUSB0`，不是 `/dev/ttyS1`**（`main.py:142`）。
-→ **在 RDK 上必须显式导出 `CHASSIS_PORT=/dev/ttyS1`**，否则会去开一个不存在的 USB 设备。
-（代码注释里 RDK 端口写的是 `/dev/ttyS0`，`serial_chassis.py:27`，**与本题给定的 `/dev/ttyS1` 不一致 → 【待确认】RDK X5 40PIN UART1 的实际设备名**。）
+> ✅ **已实测确认**：`/dev/ttyS1` @115200 —— 本会话在真机上跑通：`PING→PONG` 握手成功、`ODOM`/`IMU`/`TEL` 遥测正常收到、`VEL,200` 下发实测 **200.1mm/s**。
+> **RDK X5 40PIN UART1 的设备名就是 `/dev/ttyS1`，这一项不再是【待确认】。**
 
-确权三步，**不要跳**：
+- **代码默认值就是 `/dev/ttyS1`**：`main()` 里 `chassis = SerialChassis(port=os.environ.get("CHASSIS_PORT", "/dev/ttyS1"))`
+  （复核方式：`grep -n "CHASSIS_PORT" src/rescue_robot/main.py`，**看关键字不看行号**）。
+  → **在 RDK 上不需要显式导出 `CHASSIS_PORT`**，默认即正确的板载 UART。
+- **只有用电脑 USB-TTL 直连下位机调试时**才需要 `export CHASSIS_PORT=/dev/ttyUSB0`
+  （USB-TTL 的节点名会随插拔变化，可能是 `/dev/ttyUSB1`，用下面的 ① 确权）。
+- ⚠️ **已知文档残留（在 `src/` 内，本次不改代码）**：`hardware/serial_chassis.py` 模块 docstring 的「设备文件」段仍写着
+  `RDK 部署：/dev/ttyS0（待确认具体 UART）` —— 那是**过时注释**，**以本条实测结论 `/dev/ttyS1` 为准**，别被它带偏。
+
+以下确权三步仍建议在**换线/换板/首次上车**时走一遍（不要跳）：
 
 ```bash
 # ① 列出可用串口
@@ -136,20 +143,29 @@ print(f"3 秒内 ODOM={n_odom}  IMU={n_imu}")
 EOF
 ```
 
-**【验证】** 成功判据：`open: True`，且 `ODOM` 帧数 ≈ **60**（20Hz×3s，`serial_chassis.py:18`）、`IMU` 帧数 ≈ **150**（50Hz×3s，`serial_chassis.py:19`）。
+**【验证】** 成功判据：`open: True`，且 `ODOM` 帧数 ≈ **60**（20Hz×3s）、`IMU` 帧数 ≈ **150**（50Hz×3s）（帧率常量见 `hardware/serial_chassis.py` 模块 docstring 的「下行」段）。
 若 0 帧 → 见 §2 F1/F2。若帧数只有一半 → 波特率或丢包，见 §2 F2。
 
 ### 1.4 代码上传（仓库没有网络时的两条路）
 
-**方式 A：`scripts/deploy.sh`（rsync / scp）**
+**方式 A：`scripts/deploy.sh`（rsync / scp）—— 默认目标已对齐 RDK 现场约定**
 ```bash
-TARGET=<RDK-IP> TARGET_USER=sunrise TARGET_PATH=/home/sunrise/rescue-robot \
-  bash scripts/deploy.sh --target $TARGET
+# 默认就是 sunrise@192.168.50.2:/home/sunrise/rescue —— 现场直接跑：
+bash scripts/deploy.sh
+
+# 电脑 USB-TTL 调试 / 目标不是默认机时，用 --target 覆盖（必要时再配 --user/--path）：
+bash scripts/deploy.sh --target 192.168.1.23 --user sunrise --path /home/sunrise/rescue
+
+# 只想看它要同步什么、不连远端：--dry-run（不部署、不交互，可直接在开发机跑）
+bash scripts/deploy.sh --dry-run
 ```
-- ⚠️ **三个坑（必须先改脚本或绕开）**：
-  1. 脚本默认目标是**树莓派**：`TARGET=raspberrypi.local` / `USER=pi` / `PATH=/home/pi/rescue-robot`（`scripts/deploy.sh:11-13`）。
-  2. `rsync -avz --delete` 带 `--delete`（`scripts/deploy.sh:82`）→ **会删掉目标机上 `src/` 里多余的文件**。若 RDK 上有手工改动，先备份。
-  3. 它在远端 `sudo systemctl restart rescue-robot`（`scripts/deploy.sh:103`）——**这个 systemd 服务在本仓库里不存在**（已确认无 `*.service` 文件）。所以那条路一定会 fallback 到提示「手动启动」。
+- 脚本头部注释与 `--help` 都写明：**RDK X5 默认 `sunrise@192.168.50.2:/home/sunrise/rescue`；电脑 USB-TTL 调试时用 `--target` 覆盖**。
+- **同步内容（rsync 与 tar 兜底两条路径已统一）**：`src/`、`config/`、`scripts/`、`tools/`。
+  - 以前 rsync 只同步 `src/`（`config/` 与 `tools/` 只有 tar 兜底才带）→ 现场改 YAML「没反应」、**自检程序 `tools/hw_selftest.py` 上不了车**；现已修好（T2-19 / T2-20）。
+- ⚠️ **还剩两个坑（知道就行，不用改）**：
+  1. `src/` 与 `tools/` 走的是 `rsync -avz --delete` → **会删掉目标机这两个目录里多余的文件**。若 RDK 上有手工改动，先备份。
+     （`config/`、`scripts/` **不带** `--delete`，避免误删车上特有的配置/脚本。）
+  2. 它在远端尝试 `sudo systemctl restart rescue-robot`——**这个 systemd 服务在本仓库里不存在**（无 `*.service` 文件）。所以那条路一定会 fallback 到提示「手动启动」，**看到这行提示是正常的**，按 §1.5 手动起即可。
 
 **方式 B：base64 单文件/打包传输（无 rsync、无 scp 场景）**
 
@@ -162,59 +178,74 @@ base64 -w0 /tmp/rescue.tgz > /tmp/rescue.b64
 把 `rescue.b64` 用**任何可用通道**（U 盘 / 聊天工具 / 串口终端粘贴）送到 RDK，然后：
 ```bash
 base64 -d /tmp/rescue.b64 > /tmp/rescue.tgz
-mkdir -p ~/rescue-robot && tar xzf /tmp/rescue.tgz -C ~/rescue-robot
+mkdir -p ~/rescue && tar xzf /tmp/rescue.tgz -C ~/rescue
 ```
 
 **【验证】**
 ```bash
-cd ~/rescue-robot && PYTHONPATH=src python3 -c "import rescue_robot.main; print('IMPORT OK')"
+cd ~/rescue && PYTHONPATH=src python3 -c "import rescue_robot.main; print('IMPORT OK')"
 ls config/robot.default.yaml    # 【关键】配置是相对 CWD 找的，见 1.5
 ```
 成功判据：打印 `IMPORT OK`，且 `config/robot.default.yaml` 存在。
 
 ### 1.5 启动命令与环境变量
 
-**必须在仓库根目录启动**：配置路径 `config/robot.default.yaml` 是**相对当前工作目录**解析的（`main.py:105` + `innovation/config_loader.py:259-263` 用 `os.getcwd()`）。在别处启动 → 配置加载失败 → 打一条 warning 后**用默认参数继续跑**（`main.py:108-109`），非常隐蔽。
+**必须在仓库根目录启动**：配置路径 `config/robot.default.yaml` 是**相对当前工作目录**解析的（`main()` 里加载配置那几行 + `innovation/config_loader.py` 用 `os.getcwd()`，`grep -n "getcwd" config_loader` 复核）。在别处启动 → 配置加载失败 → 打一条 warning 后**用默认参数继续跑**（`main()` 的顺序见下一段注释块），非常隐蔽。
 
 ```bash
-cd ~/rescue-robot
-export RUN_MODE=real              # 默认是 mock！不设这个，程序不会碰真硬件
-export CHASSIS_PORT=/dev/ttyS1    # 默认 /dev/ttyUSB0 —— RDK 上必须改
-export CAM_INDEX=0                # 摄像头 index；注意自检与实际采集默认值不一致，见下表
+cd ~/rescue
+# RUN_MODE **默认就是 real**（真机）——现场不用设；显式 RUN_MODE=mock 只用于本机开发
+# CHASSIS_PORT **默认就是 /dev/ttyS1**——RDK 上不用设；只有电脑 USB-TTL 调试才设 /dev/ttyUSB0
+export CAM_INDEX=0                # 摄像头 index；自检与实际采集共用这一个默认值（0）
 export SKIP_CAMERA_CHECK=1        # 台架调试（没接摄像头）时跳过摄像头自检
 export CAM_WARMUP_S=3.0           # 摄像头首帧预热超时
 PYTHONPATH=src python3 -m rescue_robot.main
 ```
 
-**环境变量全表**（逐个核对过代码）：
+**环境变量全表**（逐个核对过代码；**行号会过期，按"代码位置"里的关键字 grep**）：
 
-| 变量 | 代码位置 | 默认值 | 作用 | 备注 |
-|------|---------|--------|------|------|
-| `RUN_MODE` | `main.py:98` | `mock` | `mock`/`real` | **默认 mock**——忘了设就会"能跑但车不动"，见 §2 F4 |
-| `CHASSIS_PORT` | `main.py:142` | `/dev/ttyUSB0` | 上位机↔下位机串口 | RDK 上要设 `/dev/ttyS1` |
-| `CAM_INDEX` | `main.py:152`（实际采集）<br>`main.py:75`（自检） | 实际采集 **0**<br>自检 **1** | 摄像头序号 | ⚠️ **同一个变量两处默认值不同**（0 vs 1）。若只设一次，自检和采集可能开的是**两个不同设备** |
-| `CAM_WARMUP_S` | `main.py:156` | `3.0` | 首帧超时；超时 → 摄像头判不可用 → 感知降级 Mock | 见 `main.py:160-167` |
-| `SKIP_CAMERA_CHECK` | `main.py:162`（`system_check.py:162`） | 未设（=检查） | `1/true/yes` → 跳过摄像头自检项 | 只影响**自检**，不影响采集 |
-| `TEAM_COLOR` | `main.py:129` | `red` | 本队安全区颜色 | 抽签后必改；非 `red` 一律当 `blue` |
+| 变量 | 代码位置（关键字） | 默认值 | 作用 | 备注 |
+|------|------------------|--------|------|------|
+| `RUN_MODE` | `main()` 内 `os.environ.get("RUN_MODE", RunMode.REAL)` | **`real`** | `mock`/`real` | **默认 real**（已从旧版的 mock 改掉）→ 现场**不设就是真机**；显式 `RUN_MODE=mock` 只用于本机开发/仿真，见 §2 F4 |
+| `CHASSIS_PORT` | `main()` 内 `SerialChassis(port=os.environ.get("CHASSIS_PORT", ...))` | **`/dev/ttyS1`** | 上位机↔下位机串口 | **RDK 上不用设**（板载 UART1 已实测 = `/dev/ttyS1`）；只有电脑 USB-TTL 调试才设 `/dev/ttyUSB0`，见 §1.3 |
+| `CAM_INDEX` | `get_camera_index()` / `_DEFAULT_CAM_INDEX` | `0` | 摄像头序号 | 自检与采集**共用同一个函数**，默认值一致（旧文档说的 0/1 不一致已不成立） |
+| `CAM_WARMUP_S` | `main()` 摄像头预热 `float(os.environ.get("CAM_WARMUP_S", "3.0"))` | `3.0` | 首帧超时；超时 → 摄像头判不可用 → 感知降级 Mock | 见 `wait_first_frame` 调用处 |
+| `SKIP_CAMERA_CHECK` | `system_check.py` 内 `os.environ.get("SKIP_CAMERA_CHECK", ...)` | 未设（=检查） | `1/true/yes` → 跳过摄像头自检项 | 只影响**自检**，不影响采集 |
+| `TEAM_COLOR` | `main()` 内 `resolve_team_color()` | `red` | 本队安全区颜色 | 抽签后必改；无法识别即**拒绝启动** |
 
-**启动后的正常日志（逐行对照，对不上就是有问题）**
+**启动后的正常日志（对不上就是有问题）**
 ```
-🔧 运行模式: REAL (真实硬件)                         ← main.py:70
-已加载 config/robot.default.yaml                     ← main.py:107
-🔵 进入 BOOT 状态 — 系统自检中...                     ← boot_state.py:46
-  [PASS] 摄像头: 正常 (...ms)                        ← system_check.py:333
+🔧 运行模式: REAL (真实硬件)                         ← main.py 的 create_hardware 工厂函数
+已加载 config/robot.default.yaml                     ← main() 配置加载处
+🔵 进入 BOOT 状态 — 系统自检中...                     ← boot_state.on_enter()
+  [PASS] 摄像头: 正常 (...ms)                        ← system_check 逐项报告
   [PASS] IMU: 正常 (...ms)
   [PASS] 电机 #1/#2: 正常 (...ms)
-  [PASS] 电池电压: 未接电压传感器（未知），跳过该项       ← system_check.py:301
-✅ 系统自检通过！                                     ← system_check.py:257
-自检通过，转入 DEBUG 状态                             ← boot_state.py:53
-🟢 进入 DEBUG 状态 — 等待一键启动...                  ← debug_state.py:52
-串口已打开: /dev/ttyS1 @ 115200                       ← serial_chassis.py:84
-摄像头 0 就绪（首帧已到）                              ← main.py:158
+  [PASS] 电池电压: 未接电压传感器（未知），跳过该项
+✅ 系统自检通过！
+自检通过，转入 DEBUG 状态
+🟢 进入 DEBUG 状态 — 等待一键启动...
+串口已打开: /dev/ttyS1 @ 115200
+摄像头 0 就绪（首帧已到）
 状态机流程: BOOT → (自检) → DEBUG → (一键启动) → AUTONOMOUS
 ```
-- **自检 5 项全 PASS** 才算 BOOT 通过（关键项任一 FAIL → 直接 ERROR，`boot_state.py:52-61`）。
-- 自检大概耗时：Mock 约 0.6s；真机受摄像头探测影响，`SKIP_CAMERA_CHECK=1` 时约 0.1s，否则最多 2s（`system_check.py:172`）。
+- **自检 5 项全 PASS** 才算 BOOT 通过（关键项任一 FAIL → 直接 ERROR）。
+- 自检大概耗时：Mock 约 0.6s；真机受摄像头探测影响，`SKIP_CAMERA_CHECK=1` 时约 0.1s，否则最多 2s。
+
+### 1.5.1 ⚠️ 真机模式下"**拒绝启动**"（返回码 1）—— 不是"能跑但车不动"
+
+**这是本会话新确认的运行事实，现场看到 CRITICAL 就该按接线类排查，别去怀疑决策/导航。**
+
+真机（`RUN_MODE=real`，即默认）下，两个致命点在代码里都是 **fail-fast**：程序**直接退出、不进入主循环**：
+
+| 触发点 | 日志特征 | 返回码 | 现场动作（按顺序） |
+|--------|---------|--------|------------------|
+| **串口打开失败**（任何原因：不存在 / 无权限 / 被占用） | `❌ 串口打开失败: /dev/ttyS1 → **拒绝启动**` + 四行 `CRITICAL` 提示与 `=` 分隔线（`main()` 内 `if not chassis.open(): ... return 1`） | **1** | ① 接线（TX/RX 交叉、共地）；② 下位机已上电；③ `id -nG \| grep dialout`（§1.2）；④ `sudo fuser -v /dev/ttyS1` 看占用（F3） |
+| **`START` 握手失败**（收不到 `PONG`/`ACK,START`） | `❌ 底盘 START 握手失败（PONG/ACK 超时）→ 拒绝进入自主模式：协议规定未 START 时所有运动命令都会被拒（ERR,NOT_STARTED）`（`AutonomousState.on_enter()` 内 `if not self._chassis.start_match(): ... emergency_stop(...)`） | — | ① TX/RX 是否交叉、是否共地；② 波特率 115200 8N1 无流控；③ 下位机固件是否在跑（`cat /dev/ttyS1` 能看到 `ODOM`/`IMU` 行）→ 见 F5 |
+
+**为什么必须这样**：下位机协议规定上电后默认**禁止运动**，必须先收到一次 `START`；若不 fail-fast，旧行为是"程序正常跑、有日志、有决策输出，但车一动不动"，现场只有一行 `⚠️` 可查，等于直接丢整场。
+
+**现场判据一句话**：日志出现 `拒绝启动` / `拒绝进入自主模式` 或进程退出码 1 → **就是接线/上电/权限/占用这四类**，不要按"车不动"去查决策与导航。
 
 ### 1.6 摄像头确认
 
@@ -262,7 +293,7 @@ done
 
 | ☐ | 检查 | 命令 / 判据 |
 |---|------|-------------|
-| ☐ | 仓库根目录 | `pwd` == `~/rescue-robot` |
+| ☐ | 仓库根目录 | `pwd` == `~/rescue`（RDK X5 现场约定路径） |
 | ☐ | 配置存在 | `ls config/robot.default.yaml` |
 | ☐ | 队伍颜色 | `grep my_color config/field.default.yaml` + `echo $TEAM_COLOR` 一致 |
 | ☐ | 依赖 | 1.1 的四版本一行打印成功 |
@@ -287,11 +318,13 @@ done
 
 | # | 故障现象 | 快速判断 | 处置动作（不换硬件） |
 |---|---------|---------|---------------------|
-| **F1** | 串口打不开：**不存在**<br>`FileNotFoundError: /dev/ttyS1` | `ls -l /dev/ttyS1` 无此文件 | ① 确认下位机已上电（F103 的 3.3V 灯亮）；② 确认 40PIN 排线/USB-TTL 插好；③ 换端口名试：`CHASSIS_PORT=/dev/ttyS0` / `/dev/ttyUSB0` / `/dev/ttyAMA0`（RDK 板载 UART1 实际名**【待确认】**）；④ 确认设备树里该 UART overlay 已启用；⑤ 台架无下位机时 → 用 `RUN_MODE=mock` 先把软件跑通（感知/决策/导航逻辑仍可验证） |
+| **F1** | 串口打不开：**不存在**<br>`FileNotFoundError: /dev/ttyS1` | `ls -l /dev/ttyS1` 无此文件 | ① 确认下位机已上电（F103 的 3.3V 灯亮）；② 确认 40PIN 排线/USB-TTL 插好；③ 若在用**电脑 USB-TTL** 调试，节点名可能是 `/dev/ttyUSB0`/`/dev/ttyUSB1` → `CHASSIS_PORT=/dev/ttyUSB1` 并核对（§1.3 ① 确权；**RDK 板载 UART1 已实测确认 `/dev/ttyS1`，不用再试别的名字**）；④ 确认设备树里该 UART overlay 已启用；⑤ 台架无下位机时 → 显式 `RUN_MODE=mock` 先把软件跑通（感知/决策/导航逻辑仍可验证） |
+
+> ⚠️ **本表 F1–F3 的终点是"拒绝启动"**：真机模式下串口打不开时程序**不会带着坏串口继续跑**，而是打 CRITICAL 后**退出（返回码 1）**，见 §1.5.1。
 | **F2** | 串口打不开：**权限不足**<br>`PermissionError: [Errno 13]` | `id -nG \| grep dialout` 空 | ① `sudo usermod -aG dialout $USER` **然后重新登录**（关键）；② 应急：`sudo chmod 666 /dev/ttyS1`；③ 别用 `sudo python3` 绕——会让生成的文件属主变 root，后面更麻烦 |
 | **F3** | 串口打不开：**被占用**<br>`Errno 16 Device or resource busy` | `sudo lsof /dev/ttyS1` 有进程 | ① `pkill -f rescue_robot.main`；② 关掉 VSCode 串口监视器 / `screen` / `minicom`；③ 确认没有第二个终端在跑同一程序；④ 重试 |
-| **F4** | 能收数据但**车不动**（最隐蔽的一个） | 日志首行是 `🔧 运行模式: MOCK` | **就是 `RUN_MODE` 没设**！`RUN_MODE` 默认 `mock`（`main.py:98`），mock 下 `chassis=None` → 根本不发 `VEL`。`export RUN_MODE=real` 重启 |
-| **F5** | `PING` 无 `PONG` | 日志 `PING 未收到 PONG，连通性检查失败`（`serial_chassis.py:160`） | ① 说明**收得到但发不出/对不出**：先按 F1.3 确认能收到 ODOM；② 检查 TX/RX 是否交叉（PA9=TX 接下位机 RX）；③ 确认双方 115200 8N1 无流控（`serial_chassis.py:8`）；④ 波特率不符会看到乱码行 → 试 9600/57600 排除；⑤ **该项只影响 `start_match()` 的返回值和自检电机项**，主循环仍会继续跑（`autonomous_state.py:157-160` 只记日志），所以别因为它误判"整机挂了" |
+| **F4** | 能收数据但**车不动** | 日志首行是 `🔧 运行模式: MOCK` | **先看第一行**：`RUN_MODE` **默认就是 `real`**，所以只有在**有人显式 `export RUN_MODE=mock`**（或脚本里带）时才会出现这行；mock 下 `chassis=None` → 根本不发 `VEL` → **取消 `RUN_MODE` 或改 `RUN_MODE=real` 再重启**。<br>⚠️ **若第一行是 `REAL` 却车不动** → 不是这个原因，改查：① 程序是否已**拒绝启动**并退出（返回码 1，见 §1.5.1）；② 是否到了 AUTONOMOUS（只有主循环发 VEL）；③ 是否被 `STOP`/`ESTOP` 锁定（F8） |
+| **F5** | `PING` 无 `PONG` | 日志 `❌ 底盘 START 握手失败（PONG/ACK 超时）→ 拒绝进入自主模式` 或 `PING 未收到 PONG，连通性检查失败`（`SerialChassis.start_match()` 内的握手判定） | ① 说明**收得到但发不出/对不出**：先按 §1.3 确认能收到 ODOM；② 检查 TX/RX 是否交叉（PA9=TX 接下位机 RX）；③ 确认双方 115200 8N1 无流控（见 `serial_chassis.py` 模块 docstring「串口约定」段）；④ 波特率不符会看到乱码行 → 试 9600/57600 排除；⑤ ⚠️ **真机模式下这项是致命的**：`start_match()` 失败会让 `AutonomousState.on_enter()` **拒绝进入自主模式并急停**（协议规定未 START 时所有运动命令都被拒 `ERR,NOT_STARTED`）→ 车不会动，**别把它误判成"整机挂了"或"能跑但车不动"**（旧版只记一行日志继续跑，现已改为 fail-fast，见 §1.5.1） |
 | **F6** | **收不到遥测**（`read_pose()` 一直 None） | 1.3 脚本 ODOM=0；或日志里 `_pose` 卡在初始 (150,150,π/2) | ① 先按 F1/F2/F3 排除打开问题；② 若打开成功但无数据 → **TX/RX 接反**或**没共地**（最常见）；③ 检查下位机是否在发（用串口助手裸看）；④ 降级：无遥测时上位机**不会崩**，会一直用初始位姿——但导航会彻底失准，属于必须修好的项，不能带病比赛 |
 | **F7** | 遥测**帧率不对**（ODOM 少于 20Hz / IMU 少于 50Hz） | 1.3 脚本读数明显偏小 | ① 波特率不匹配 → 换波特率复测；② 若只是 ODOM 慢：**这是代码的正常行为**——主循环每帧只读**一行**（`autonomous_state.py:241` → `read_pose()` → `_read_line()` 单次读），串口是 IMU/ODOM 混流，实际位姿更新率被"每帧一行"限制。**不是故障**，但要知道位姿延迟见 §3 |
 
@@ -422,7 +455,7 @@ from rescue_robot.main import main; main()
 2. `A* 成功: N waypoints, Xmm, Yms`（`path_planner.py:199-200`）→ **A\* 绝对值**，最该盯的数。
 3. 主循环实际频率：`主循环结束，共运行 N 个周期`（`autonomous_state.py:235`）÷ 运行秒数 → 稳态是否真 50Hz。
 
-**【待确认】**：以上全部为静态估算，**没有在 RDK X5 上实测过**。比赛前必须在实机上跑一次 3.4，把三个数字填回本表。
+**【待实测】**：以上全部为静态估算，**没有在 RDK X5 上实测过**。比赛前必须在实机上跑一次 3.4，把三个数字填回本表。
 
 > **`docs/audit/CODE_AUDIT.md`（S-23）的实测数据可交叉参考**：审计报告记录了「`read_pose()` 串口超时 + `A*` 单次 **26 ms**」都超出 20ms 预算——**26ms 单次 A\* 与本文 §3.2 的"典型 1–5ms / 最坏 50–300ms"区间相符**（26ms 落在中段，说明典型场景就已经贴近甚至超过预算）。**A\* 优化（§3.3-2）的优先级应视为最高**，不要因为"平时看着还行"而忽略。
 > ⚠️ 注意：S-23 的行号是**审计当时的代码状态**；`autonomous_state.py`、`navigation_pipeline.py` 等在撰写期间仍在改动，**以函数名 grep 为准**。
@@ -537,8 +570,8 @@ PYTHONPATH=src python3 tools/hw_selftest.py --duration 5       # 遥测/速度�
 | 2 | **相机光心高度 `HEIGHT_MM`** | `config.py:99`（当前 210mm） | 与文档一致（`HARDWARE_DEPENDENCIES.md:41`） | 卷尺实测 |
 | 3 | **套取 ROI `SLEEVE_ROI`** | `config.py:107`（当前 `(0.32,0.55,0.68,0.98)`） | **从未标定**，但 `SLEEVE_CONFIRM=True` **默认开启**（`config.py:109`） | 把目标放进 U 型槽，看检测框中心落在归一化坐标哪个区间；**标定前建议先关掉** |
 | 4 | **HSV 阈值（9 种颜色）** | `detection.py:33-46` | 硬编码，未按现场光照标定 | `tools/vision_calibration.py` |
-| 5 | **相机 index** | 环境变量 `CAM_INDEX` | 代码两处默认值不一致（0 vs 1） | 1.6 的循环脚本 |
-| 6 | **RDK X5 UART 设备名** | `CHASSIS_PORT` | 代码默认 `/dev/ttyUSB0`，注释写 `/dev/ttyS0`，本题要求 `/dev/ttyS1` | 1.3 的数据确权脚本 |
+| 5 | **相机 index** | 环境变量 `CAM_INDEX` | 默认 `0`（自检与采集共用一个默认值，已一致） | 1.6 的循环脚本 |
+| 6 | ~~RDK X5 UART 设备名~~ | `CHASSIS_PORT` | ✅ **已闭环**：`/dev/ttyS1` @115200 真机实测跑通（PING→PONG / ODOM+IMU+TEL / VEL 200.1mm/s），且**代码默认值就是 `/dev/ttyS1`** | 无需再确权；仅电脑 USB-TTL 调试时用 `/dev/ttyUSB*`，见 §1.3 |
 | 7 | **电池低压阈值** | `config.py:60`（11.0V） | 电池类型未最终确认（12V/2500mAh，`HARDWARE_DEPENDENCIES.md:128-134`） | 量一次低电量实压 |
 | 8 | **`VEL` 的 w 符号 / 直行方向** | — | 未实测 | §4 R6 |
 | 9 | **推进距离 `_push_dist_mm`** | `transport_pipeline.py:106`（当前 100mm） | 注释标明"真机标定" | 实测推入斜坡所需距离 |
@@ -552,14 +585,14 @@ PYTHONPATH=src python3 tools/hw_selftest.py --duration 5       # 遥测/速度�
 
 ```bash
 # ── RDK X5 比赛现场（真机）──
-export RUN_MODE=real
-export CHASSIS_PORT=/dev/ttyS1
+export RUN_MODE=real           # 已是代码默认值，写出来只为现场一眼确认
+export CHASSIS_PORT=/dev/ttyS1 # 已是代码默认值；只有电脑 USB-TTL 调试才需要改成 /dev/ttyUSB0
 export CAM_INDEX=0
 export TEAM_COLOR=red          # 抽签结果
 export CAM_WARMUP_S=3.0
 # export SKIP_CAMERA_CHECK=1   # 仅台架无摄像头时打开
 
-cd ~/rescue-robot
+cd ~/rescue
 PYTHONPATH=src python3 -m rescue_robot.main
 
 # ── 台架 / 无硬件（开发机）──
@@ -596,39 +629,44 @@ PYTHONPATH=src python3 tools/hw_selftest.py --only serial
 | 禁区越界回退速度 | -200 mm/s（倒车） | `navigation_pipeline.py:177` | 越界后的自救 |
 | 目标点禁区钳制 | 钳到最近合法点，最多迭代 8 次 | `forbidden_zones.py:156-192` | 防止开进对方安全区 |
 
-## 附录 C：本文档引用过的源码位置（便于复核）
+## 附录 C：本文档涉及的源码/文档位置（**按符号 grep，不按行号**）
 
-```
-main.py:72-76, 98, 105-109, 129, 137-176, 179-192, 224-230, 247-262, 269-292
-config.py:14-35, 60-64, 99-109, 126-148
-state_machine.py:34-39, 184-203
-system_check.py:156-207, 225-262, 293-310, 312-334
-states/boot_state.py:44-61
-states/debug_state.py:50-61
-states/autonomous_state.py:52-54, 59-60, 143, 189, 213-235, 237-334, 339-354, 389-449
-hardware/chassis_interface.py:11-13, 41, 65-104
-hardware/serial_chassis.py:8, 18-19, 56, 72-85, 106-167, 171-263, 265-327
-hardware/camera_reader.py:1-22, 61-99, 125-189
-hardware/button.py:84-113
-perception/detection.py:33-46, 146, 173-248, 250-268, 317-322, 324-398
-perception/classification.py:49-97, 99-135
-perception/perception_pipeline.py:145-234, 274-283
-perception/world_map.py:85-97, 157-161, 237-298, 300-366
-perception/field_elements.py:93-115, 118-267
-decision/decision_engine.py:98-99, 247-257, 261-320, 325-337, 339-407
-decision/target_selector.py:42-109, 169-223
-navigation/navigation_pipeline.py:59-99, 138-273, 286-301, 315-335
-navigation/path_planner.py:25-34, 163-240, 275-331, 333-369
-navigation/motion_control.py:107-116, 153-219
-navigation/forbidden_zones.py:54-58, 70-131, 194-199
-transport/transport_pipeline.py:106, 111-115, 173-175, 193-242, 246-277, 279-431
-transport/sleeve_lift.py:32-36, 181-315, 321-443
-transport/load_manager.py:29-49, 89, 139-181, 183-234, 236-312
-innovation/config_loader.py:24, 75-112, 259-263, 420-425
-tools/hw_selftest/framework.py:1-9, 100-234, 245-279
-tools/hw_selftest/__init__.py:1-16
-config/robot.default.yaml:1-6, 31-41, 52-53, 70-78
-config/field.default.yaml（全文）
-HARDWARE_DEPENDENCIES.md:31-35, 41, 89-95, 128-134
-README.md:74-82, 339-395
-```
+> ⚠️ **行号会过期**（`src/` 一直在改，本文撰写期间就曾失效过：旧文写的 `main.py:142` = `CHASSIS_PORT` 默认值、
+> `serial_chassis.py:27` = RDK 端口注释，都已对不上）。所以本附录**只给文件 + 关键字/函数名**，
+> 复核时直接 `grep -n "<关键字>" <文件>`，**不要把行号当契约**。
+
+| 文件 | 用这些关键字/符号定位 |
+|------|---------------------|
+| `main.py` | `def main()`、`os.environ.get("RUN_MODE", RunMode.REAL)`、`os.environ.get("CHASSIS_PORT"`、`validate_field_config()`、`resolve_team_color()`、`get_camera_index()` / `_DEFAULT_CAM_INDEX`、`create_hardware`、`sources` 创建、`if not chassis.open(): ... return 1`、`finally:`（`close()` 串口/摄像头线程） |
+| `config.py` | `TEAM_COLOR` 常量区、电机/舵机引脚注释、`POST_START_DELAY_MS`、电池低压阈值、`Camera.TILT_DEG` / `HEIGHT_MM` / `SLEEVE_ROI` / `SLEEVE_CONFIRM` |
+| `state_machine.py` | `one_key_start()`、`_one_key_started`、状态枚举与转移表 |
+| `system_check.py` | `SKIP_CAMERA_CHECK`、逐项 PASS/FAIL 报告、电池电压"未知则放行"分支 |
+| `states/boot_state.py` | `on_enter()`（自检 → DEBUG/ERROR 分支） |
+| `states/debug_state.py` | `on_enter()`（等待一键启动） |
+| `states/autonomous_state.py` | `on_enter()`（含 `start_match()` 拒绝进入自主模式）、`dt = 0.02`、`while not self._stop_event.is_set()`、`_update_watchdog`、看门狗时间常量（10/13/15s）、`_halt_for_capture` 调用处 |
+| `hardware/chassis_interface.py` | 单位约定 docstring、`odom_to_upper()`、`velocity_to_command()`、初始朝向常量 |
+| `hardware/serial_chassis.py` | 模块 docstring「串口约定」+「设备文件」（**其中 `/dev/ttyS0` 是过时注释**）、`open()`、`start_match()`、`read_pose()`、`parse_frame()`、`parse_imu()`、`_read_line()`、`_send()` |
+| `hardware/camera_reader.py` | `start()` / `wait_first_frame()` / `stop()`、后台采集线程 |
+| `hardware/button.py` | `MockButton`（键盘 `l`/`s`/`q`）、`input()` 的 `EOFError` 兜底 |
+| `perception/detection.py` | `HSV` 阈值段、`min_contour_area`、`getStructuringElement`（每颜色重建）、`_calc_confidence`、`estimate_ground_position`、`CVDetector.detect()` 的 cv2 缺失降级 |
+| `perception/classification.py` | 颜色容差表、`_fuzzy_match`（`LIGHT_BLUE`↔`WHITE`） |
+| `perception/perception_pipeline.py` | 延迟统计 `latency_ms`（`logger.debug`） |
+| `perception/world_map.py` | `MIN_SEEN_COUNT`、关联阈值、`_offer_pending` / `_age_pending`、丢失移除阈值 |
+| `perception/field_elements.py` | 场地坐标系注释（原点/轴向） |
+| `decision/decision_engine.py` | `start_match` 前的决策入口、`FIRST_TRIP` 分支（`select_best_for_first_trip`）、`max_count=3`、`include_injured=True` 调用点、`_check_invalid_transport` |
+| `decision/target_selector.py` | `select_best_for_first_trip()`、危险目标 `points=0`、`select_best()`（死代码） |
+| `navigation/navigation_pipeline.py` | `set_target()`（禁区钳制）、越界回退（倒车 -200mm/s）、重规划间隔常量（30 帧）、DWA 触发条件 `_is_near_obstacle` |
+| `navigation/path_planner.py` | 网格尺寸常量、`min(open_set, key=...)`、`LocalPlanner.plan(dt=...)`、A* 独立测试段 |
+| `navigation/motion_control.py` | `track_path()` / `compute_velocity()`、到位容差 |
+| `navigation/forbidden_zones.py` | 外扩常量（对方安全区 50mm / 场边 100mm）、`write_to_cost_map()`、`clamp_to_safe()` |
+| `transport/transport_pipeline.py` | `_halt_for_capture()`、套取/投放触发距离、视觉确认与自动关闭（连续 5 次）、`_push_dist_mm`、趟次日志 |
+| `transport/sleeve_lift.py` | `RAISE/LOWER/HOLD` 抽象、角度语义（0°=下压 / 70°=抬起）、`lower_with_retry`、`place_ramp` |
+| `transport/load_manager.py` | `MAX_LOAD`、`can_load()` / `can_load_batch()`（危险目标拒绝、伤员独占） |
+| `innovation/config_loader.py` | `ConfigLoader.load_yaml()`、`os.getcwd()` 相对路径解析、YAML 缺失降级 JSON |
+| `tools/hw_selftest.py` | `--only/--mock/--yes-motion/--port/--duration/--image/--list`、`--port` 默认 `CHASSIS_PORT` 否则 `/dev/ttyS1` |
+| `tools/hw_selftest/framework.py` | "绝不抛异常"约定、串口错误四分类、无硬件 SKIP、`--yes-motion` 安全闸门 |
+| `config/robot.default.yaml` | `robot.strategy_weights`、`motors.max_speed_mm_s` / PID、比赛时长、`perception.detection.min_confidence` / `association_threshold_mm`、颜色↔类型映射 |
+| `config/field.default.yaml` | 全文（`my_color` 等） |
+| `scripts/deploy.sh` | 头部注释与 `--help`（默认目标）、`SYNC_DIRS=(src config scripts tools)`、`DELETE_DIRS=(src tools)`、`rsync_one()`、`tar czf ... "${SYNC_DIRS[@]}"`（tar 兜底）、`--dry-run` 分支、健康检查里的 `tools/hw_selftest.py` / `config/robot.default.yaml` 存在性检查 |
+| `HARDWARE_DEPENDENCIES.md` | 摄像头倾角/高度、一键启动按钮缺件、电池规格、单位换算表 |
+| `README.md` | 整机重量/尺寸要求、赛项要点 |
