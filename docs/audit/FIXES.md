@@ -16,7 +16,13 @@
 | 阶段 | score | delivered | valid | 说明 |
 |---|---|---|---|---|
 | 初始基线 | 105 | 12/14 | 12 | 其中 5 个是"一趟带 3 个但只去过第 1 个"的**虚高**（S-40） |
-| 当前（队长 S-40 修完后） | **80**（5 种子 80/80/85/80/80，均值 81） | **7/14** | **7** | 一趟只真正带走 1 个，**valid 全等 delivered**，0 扣分 0 异常 |
+| 当前（队长 S-40 修完后） | **80**（基准口径 5 种子 80/80/80/85/80，均值 81；口径见下注） | **7/14** | **7** | 一趟只真正带走 1 个，**valid 全等 delivered**，0 扣分 0 异常 |
+
+> 📌 **基线口径三要素（引用时须写明）**：仓库脚本 `tools/fix_verifiers/snapshot_sim.py`、
+> `SEEDS=[1,7,42,99,123]`、`start_zone=1` → **score 80/80/80/85/80、delivered 7/7/7/8/7**。
+> 本行早期版本写的 `80/80/85/80/80` 出自另一套临时 harness（`(1,42,123,7,2024)@start_zone=3`），
+> 两者均值相同、逐种子对应关系不同。**已用 `git worktree` 对照修复前提交 `ba4df56` 验证：
+> 修复前后逐位一致，零回退。** 完整对照见 `FULL_PROBLEM_LIST.md §回归基线三要素`。
 
 > ⚠️ **S-40 说明（重要，防误判为性能回归）**：修复"多目标假装载"后仿真分数从 105 降到 80，
 > 这是**去虚高的必然结果，不是性能回归**。旧数字里 12 个"送达"中有 5 个是机器人**从未到达**
@@ -192,7 +198,7 @@
 验证脚本已**固化进仓库**（不放 /tmp，避免被环境清理导致无法复现）：
 
 ```bash
-# 一次跑完全部修复验证（6 个脚本，共 66 项断言）
+# 一次跑完全部修复验证（7 个脚本）
 PYTHONPATH=src python3 tools/fix_verifiers/run_all.py
 ```
 
@@ -211,7 +217,7 @@ PYTHONPATH=src python3 tools/fix_verifiers/run_all.py
 | 全模块导入（`pkgutil.walk_packages`） | 59 ok / 0 failed |
 | `tests/test_core_units.py`（直接调用，pytest 不可用） | 12 passed / 0 failed |
 | `python3 -m rescue_robot.transport.transport_pipeline` | 全部通过 |
-| `python3 tools/hw_selftest.py --mock` | **PASS=6 FAIL=0 SKIP=7** |
+| `python3 tools/hw_selftest.py --mock` | **PASS=7 FAIL=0 SKIP=7**（14 模块） |
 | 集成仿真 5 种子 | score 70~80 / delivered 7/14 / **valid 7**（见文件开头基准变更说明） |
 
 

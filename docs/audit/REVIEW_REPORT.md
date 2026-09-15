@@ -230,7 +230,7 @@ all_valid = all(r.is_valid for r in results)
 | 全模块导入（`pkgutil.walk_packages`） | **59 ok / 0 failed** | 无导入破坏 |
 | `tests/test_core_units.py`（手动收集） | **12 passed / 0 failed** | 单测 |
 | `PYTHONPATH=src python3 tools/fix_verifiers/run_all.py` | **6/6 通过（66 项断言）** | 修复验证套件 |
-| `PYTHONPATH=src python3 tools/hw_selftest.py --mock` | **PASS=6 FAIL=0 SKIP=7** | 分部自检（与 t5 记录的 PASS=7 差异见下） |
+| `PYTHONPATH=src python3 tools/hw_selftest.py --mock` | **PASS=6 FAIL=0 SKIP=7** | 分部自检（与 t5 记录的 PASS=7 差异见下；✅ 已澄清：并发写文件瞬时读数，**最终为 PASS=7**） |
 | `PYTHONPATH=src python3 tools/fix_verifiers/snapshot_sim.py` | **score 80/80/80/85/80；delivered 7/7/7/8/7；valid==delivered** | 5 种子仿真 |
 | 载规则 13 组用例 | 全部符合 5 条规则（§3） | 合规核对 |
 | `clamp_into_area` → `classify` 5 场景 | **全部 valid=True** | BLOCKER-1 复现 |
@@ -242,10 +242,20 @@ all_valid = all(r.is_valid for r in results)
    且 `start_zone=3`；而仓库里的 `tools/fix_verifiers/snapshot_sim.py:33-35` 用 **`start_zone=1`**。
    我跑的是**仓库脚本**，得 `80/80/80/85/80`（均 81）；文档声称 `80/80/85/80/80`（均 81）——**均值一致、逐种子对应关系不同**。
    → **建议**：交付文档统一写明"脚本 + 种子集合 + `start_zone`"三要素，避免下游复现不上。
+   ✅ **已处置（队长，结项批次）**：建议已照办——`FULL_PROBLEM_LIST.md` 新增 **§回归基线三要素**，
+   以仓库脚本 `snapshot_sim.py`（`SEEDS=[1,7,42,99,123]`、`start_zone=1` → **80/80/80/85/80、7/7/7/8/7**）
+   为**唯一对外口径**，旧口径降级为"仅存档勿引用"；`VERIFICATION_REPORT` / `FIXES` / `S_NEW` 三处引用同步改写。
+   并额外补做**修复前后对照**（`git worktree` 拉 `ba4df56` 跑同一脚本）：**逐位一致，零回退**——
+   该对照同时否证了"多口径差异源于本轮修复"的可能。
 2. **`hw_selftest --mock` PASS 数（已澄清，非缺陷）**：`FIXES.md:209` 与 `S_NEW §5` 记 6，
    `VERIFICATION_REPORT` 记 7。我首轮跑得 6、复跑得 **7**（含新增 `accounting` 模块，`--list` 确认已注册 14 个模块）。
    成因是**并发写文件造成的瞬时读数**（test-author 当时正在增补 `m_accounting.py`），**不是口径不一致**。
    → **建议**：交付文档把该数字更新为 `PASS=7 FAIL=0 SKIP=7`（14 模块），并注明"读数需在无并发写入时采集"。
+   ✅ **已处置（队长，结项批次）**：`FIXES.md`、`S_NEW §5`、`HW_SELFTEST.md §6.1/§6.2` 均已改为
+   **`PASS=7 FAIL=0 SKIP=7`（14 模块）**，并注明"读数需在无并发写入时采集"。
+   同时复核了两个**故障注入**读数（`--image 不存在的图` → `PASS=6 FAIL=5 SKIP=3`、
+   `--mock --image gray150.png` → `PASS=6 FAIL=1 SKIP=7`）：**实测与记录逐字一致，属正确读数，未改动**
+   （它们 PASS=6 是因为 `vision` 模块由 PASS 转为 FAIL：7−1=6，不是旧口径）。
 
 ---
 

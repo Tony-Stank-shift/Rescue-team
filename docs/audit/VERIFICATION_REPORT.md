@@ -14,7 +14,7 @@
 |---|---|
 | 编译 / 导入 / 单测 / 模块自测 | ✅ 全部通过（compileall exit 0；59/59 模块导入；单测 12/12；20/21 模块 `__main__` exit 0） |
 | 分部实机测试程序（`hw_selftest`） | ✅ **真实可用**：`--mock` PASS=7 FAIL=0 SKIP=7 exit 0；**4 例故障注入全部报出 FAIL 并指明模块名** |
-| 诚实集成基准（5 种子） | ✅ 复现队长数字：**80/80/85/80/80 分，delivered 7/7/8/7/7，valid==delivered，ERROR=0** |
+| 诚实集成基准（5 种子） | ✅ 基线成立：**`valid==delivered`、`ERROR=0`、危险物从未转运**（三套 harness 口径下均成立）。<br>⚠️ **种子口径须三要素写明**：仓库脚本 `snapshot_sim.py`（`SEEDS=[1,7,42,99,123]`、`start_zone=1`）为 **80/80/80/85/80，7/7/7/8/7**；本报告早期引用的 `80/80/85/80/80、7/7/8/7/7` 出自临时脚本 `(1,42,123,7,2024)@start_zone=3`。详见 `FULL_PROBLEM_LIST.md §回归基线三要素` |
 | S-40 / S-01 / S-02 / B8 / S-NEW 修复 | ✅ 真实有效（我独立复现并尝试推翻，未能推翻） |
 | B3 首趟闭环 / B4 投放判定 | ⚠️ **B4 引入恒真判定（新 blocker）**，并**反向废掉 B3 的围栏内侧闸门** |
 | 旧基准 105/12/12 | ✅ 确认已作废（S-40 虚高），不得再作基线 |
@@ -157,7 +157,7 @@ PASS=7  FAIL=0  SKIP=7    ✅ 结论：未发现故障模块（部分模块因�
 | **S-40 下半** 决策只给真送达者标记 | `decision_engine.py:143` `_delivered_ids`；`:192,281,306` 三处 `delivered_ids` 参数；`:341-351` 首趟 `id not in delivered_ids → 重做首趟`；`:466-472` FREE_RUN 只标记真送达 | 行为已复现（需同时传 `release_valid=True`，见 N-8） | ✅ 真实 |
 | **S-01 终场停车** | `autonomous_state.py` `_run_once` 顶部终场分支（`clear_target` + `_stop_chassis` + `_stop_event.set`）——`inspect.getsource` 实测片段含 `# ── 终场停车（S-01）──` | 反验：正常开局 `state=FIRST_TRIP`、正常 NAVIGATE_TO 后仍 `!= DONE`，**不会误触发** | ✅ 真实 |
 | **S-NEW 越界拒绝 + 不变更原目标** | `navigation_pipeline.py:126-155`：`is_in_field` 不通过 → `_rejected_targets += 1` + WARNING + `return False`，**不修改 `_target`** | 实测 `set_target(9000,9000)→False`、`(-500,1500)→False`、`(1500,9000)→False`，三次之后原目标仍是 `(1500,1500)`；场内目标 `→True` | ✅ 真实（但见 N-9 边界可观测性缺陷） |
-| **S-02 忙碌时拒 start_trip** | `transport_pipeline.py` `start_trip` 守卫（队长护栏脚本断言 CAPTURING 中被拒） | `run_all.py` 6/6、`verify_s40_s01_team.py` 18/18 全过（我复现其输出） | ✅ 真实 |
+| **S-02 忙碌时拒 start_trip** | `transport_pipeline.py` `start_trip` 守卫（队长护栏脚本断言 CAPTURING 中被拒） | `run_all.py` 6/6、`verify_s40_s01_team.py` 18/18 全过（我复现其输出）<br>（上述为**评审当时**口径；结项批已扩至 **`run_all.py` 7/7 套、`verify_s40_s01_team.py` 51 项断言**，均实测通过） | ✅ 真实 |
 | **B8 场心误判** | 只认"**已送达过**的目标回到场心"（`_delivered_ids` 成员判定） | 实测：无关 ACTIVE 目标在距场心 28mm → `_check_invalid_transport()` 返回 **False**；把它加入 `_delivered_ids` 后 → 返回 **True** | ✅ 真实 |
 | **B3 首趟闭环** | `decision_engine.py:354-357` `release_valid is None → True`（兼容旧调用）；`:358-365` `release_valid=False` → 保持 FIRST_TRIP 重做首趟 | 关闭闸门本身有效（不传 `release_valid` 时首趟被判无效并重做）；**但闸门输入被 B4 污染**，见 N-7 | ⚠️ 部分有效 |
 | **N-1 加固** | `anomaly_handler.py:125` `speed = 0.0`；`:132` 守卫内重新赋值；`:194` 卡死检测使用 | 当前 5 种子 `ERROR=0`，集成仿真不再每帧 `DECISION_ERROR` | ✅ 真实 |

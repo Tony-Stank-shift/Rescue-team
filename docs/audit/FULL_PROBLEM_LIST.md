@@ -278,7 +278,10 @@
 `from_yaml` 内已串 `ConfigLoader.merge_with_env(data)`（`RESCUE_*` 环境变量覆盖链路打通，无该前缀时是恒等变换）；
 `TargetSelector` 读取 `robot.strategy_weights.*`（公式改为 `distance_factor=(1-dist/4242)**(distance_weight/0.3)` 等，
 并保留原默认值语义），由 `config.apply_robot_config` 注入。
-**队长复核**：`compileall` OK、`run_all` 7/7、`hw_selftest --mock` PASS=7/SKIP=7、**集成仿真 5 种子仍是 80/80/85/80/80、delivered 7/7/8/7/7、valid==delivered、ERROR=0（默认行为未变）**。
+**队长复核**：`compileall` OK、`run_all` 7/7、`hw_selftest --mock` PASS=7/SKIP=7、
+**集成仿真基线未变**——口径见文末「回归基线三要素」（仓库脚本 `snapshot_sim.py`，
+`SEEDS=[1,7,42,99,123]`、`start_zone=1`：`score 80/80/80/85/80`、`delivered 7/7/7/8/7`、
+`valid==delivered`、`ERROR=0`）。
 
 ### T2-19 ~ T2-22 的修改说明（并行子代理执行，队长已复核）
 统一清单 `SYNC_DIRS=(src config scripts tools)` / `DELETE_DIRS=(src tools)`，**rsync 与 tar 兜底两条路径同源**；
@@ -347,12 +350,64 @@ RUNBOOK §1.3 按真机实测改为"`/dev/ttyS1` 已确认"、`RUN_MODE` 默认 
 | 级别 | 已修改 | 故意保留（原因） |
 |---|---|---|
 | **T0** | **10 / 10 全部** | — |
-| **T1** | **12 / 15** | T1-3（巡航速度只 163mm/s，提速必须真机验证制动距离，**留待真机**） |
-| **T2** | **17 / 23**（T2-4 部分） | T2-7（`robustness/` 三件套 ~2165 行未接线：属"接线即新功能"，改动面大、非丢分项）<br>T2-8（舵机动作同步阻塞主循环 0.9–6s：需改成异步舵机 + 速度保活帧，属真机联调范围）<br>T2-16（面积门槛导致 1.2m 外检不到：需真机图像标定门槛）<br>T2-4 剩余（`imu_data` 每帧读串口、`SensorHealthMonitor` 完整降级链） |
+| **T1** | **14 / 15 ✅** | T1-3 ⏸（巡航速度只 163mm/s，提速必须真机验证制动距离，**留待真机**） |
+| **T2** | **19 / 23 ✅**（另 T2-4 🟡 部分） | T2-7 ⏸（`robustness/` 三件套 ~2216 行未接线：属"接线即新功能"，改动面大、非丢分项）<br>T2-8 ⏸（舵机动作同步阻塞主循环 0.9–6s：需改成异步舵机 + 速度保活帧，属真机联调范围）<br>T2-16 ⏸（面积门槛导致 1.2m 外检不到：需真机图像标定门槛）<br>T2-4 🟡 剩余（`imu_data` 每帧读串口、`SensorHealthMonitor` 完整降级链） |
+
+**合计**：✅ **43 条**（T0 10 + T1 14 + T2 19）、🟡 **1 条**（T2-4）、⏸ **4 条**（T1-3 / T2-7 / T2-8 / T2-16），
+T0–T2 共 48 条**无一条漏标**；T3 共 25 条按范围整体保留（见上表）。
 
 **每条修改的验证方式**：定向断言（构造触发场景 → 断言修复前会错、修复后正确）+ 回归四件套
 （`compileall` / `run_all.py` 7/7 / `hw_selftest --mock` PASS=7 FAIL=0 SKIP=7 / 决策引擎自测 exit 0）+ **集成仿真 5 种子**。
-**最终基线（保持未变）**：`score 80/80/85/80/80`、`delivered 7/7/8/7/7`、`valid == delivered`、`ERROR=0`。
+**最终基线（保持未变）**：口径见下节「回归基线三要素」——仓库脚本 `snapshot_sim.py`
+（`SEEDS=[1,7,42,99,123]`、`start_zone=1`）得 `score 80/80/80/85/80`、`delivered 7/7/7/8/7`、
+`valid == delivered`、`ERROR=0`；且**与修复前逐位一致（零回退，见下节对照证据）**。
+
+---
+
+# 回归基线三要素（口径统一，防下游复现不上）
+
+> 历史遗留问题：本仓库先后用过**多套仿真 harness**，种子集合与 `start_zone` 不同，
+> 导致各文档记的"5 种子序列"互不相同（`REVIEW_REPORT.md` §6 曾专门指出该差异：
+> 评审跑仓库脚本得 `80/80/80/85/80`，而文档写 `80/80/85/80/80`）。
+> 现统一如下：**引用基线必须同时写明「脚本 + 种子集合 + start_zone」三要素。**
+
+| 口径 | 脚本 | 种子集合 | start_zone | score | delivered |
+|---|---|---|---|---|---|
+| **✅ 基准口径（唯一对外口径）** | `tools/fix_verifiers/snapshot_sim.py` | `[1, 7, 42, 99, 123]` | `1` | **80/80/80/85/80** | **7/7/7/8/7** |
+| 历史口径（仅存档，勿再引用） | 临时脚本 `/tmp/reg5.py` | `(1, 42, 123, 7, 2024)` | `3` | 80/80/85/80/80 | 7/7/8/7/7 |
+| 队长复查口径 | 自建 harness，`IntegratedSim(seed=s)` 用默认 zone | `1..5` | 默认 | 80/80/85/85/80 | 7/7/8/8/7 |
+
+**共同不变量（三种口径均成立）**：`valid == delivered`（零投错区）、`ERROR == 0`（零异常）、
+危险目标从未被转运、无一场出现 `运危险物=True`。
+
+**复核命令（任何人可原样复现）**：
+```bash
+cd <仓库根>
+PYTHONPATH=src python3 tools/fix_verifiers/snapshot_sim.py
+# 期望：5 行全 ✅；score 80~85；valid == delivered；无 ERROR
+```
+
+## 零回退对照证据（本轮修复前 vs 修复后）
+
+为排除"本轮 T0/T1/T2 修复把仿真跑坏"的可能，用 **`git worktree` 拉出修复前的提交 `ba4df56`**，
+在同一台机器、同一份（已修好解析 bug 的）`snapshot_sim.py`、同一组种子下各跑一遍：
+
+| 代码状态 | commit | score 序列 | delivered 序列 |
+|---|---|---|---|
+| 修复前 | `ba4df56` | 80/80/80/85/80 | 7/7/7/8/7 |
+| 修复后 | `c80d3e5` | 80/80/80/85/80 | 7/7/7/8/7 |
+
+→ **逐位完全一致：本轮修复未改变仿真行为（零回退）**。这是"默认行为不变"最直接的证据——
+比"基线数字没变"更强，因为后者无法区分"没改坏"与"改好一处又改坏一处"。
+
+复现方式：
+```bash
+git worktree add /tmp/pre ba4df56
+cd /tmp/pre && PYTHONPATH=$PWD/src python3 tools/fix_verifiers/snapshot_sim.py
+```
+
+> ⚠️ 注意：`ba4df56` 自带的 `snapshot_sim.py` 有解析 bug（`line.split(" ", 5)` 解包失败），
+> 该 bug 已在本轮 tools 提交中修掉；对照时须使用**修复后的**同名脚本指向旧 `src`。
 
 **证据**：每条"已修改"都带实测输出（见各级的修改说明）。
 

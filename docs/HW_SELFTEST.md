@@ -68,7 +68,7 @@ PYTHONPATH=src python3 tools/hw_selftest.py --list
 **结论行**（汇总表最后两行）：
 
 ```
-  PASS=6  FAIL=4  SKIP=3
+  PASS=7  FAIL=4  SKIP=3
   ❌ 结论：故障模块 = serial, telemetry, servo, camera
 ```
 
@@ -166,15 +166,15 @@ start_button → servo → odometry → motors → velocity → camera → visio
 
 ### 6.1 `--mock`（14 模块全跑，不崩）
 ```
-  PASS=6  FAIL=0  SKIP=7
+  PASS=7  FAIL=0  SKIP=7
   ✅ 结论：未发现故障模块（部分模块因环境受限 SKIP）
 ```
 `SKIP` 的 7 项：`serial/telemetry/servo/odometry/motors/velocity`（无串口权限）+ `camera`（无摄像头）。
-`PASS` 的 6 项：`ranging/decision/navigation/transport/start_button/vision`（不依赖硬件的都真跑了）。
+`PASS` 的 7 项：`ranging/decision/navigation/transport/start_button/vision/accounting`（不依赖硬件的都真跑了）。
 
 ### 6.2 真机模式（不加 `--mock`，本机无权限/无摄像头 → 如实报 FAIL）
 ```
-  PASS=6  FAIL=4  SKIP=3
+  PASS=7  FAIL=4  SKIP=3
   ❌ 结论：故障模块 = serial, telemetry, servo, camera
 ```
 - `serial/telemetry/servo` FAIL 原因：`/dev/ttyS1 存在但当前用户**无权限**`（Errno 13）

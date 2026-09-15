@@ -93,11 +93,11 @@
 | 项 | 命令 | 结果 |
 |---|---|---|
 | 编译 | `python3 -m compileall -q src/rescue_robot tools` | exit 0 |
-| 集成仿真 5 种子 | `python3 /tmp/reg5.py`（见 §9 的伪代码） | score 80/80/85/80/80；delivered 7/7/8/7/7；valid == delivered；`sim.events` 中 ERROR = 0 |
+| 集成仿真 5 种子 | `PYTHONPATH=src python3 tools/fix_verifiers/snapshot_sim.py` | **基准口径**（`SEEDS=[1,7,42,99,123]`、`start_zone=1`）：score 80/80/80/85/80；delivered 7/7/7/8/7；valid == delivered；`sim.events` 中 ERROR = 0。<br>（本节早期版本用临时脚本 `/tmp/reg5.py`、种子 `(1,42,123,7,2024)`、`start_zone=3`，得 80/80/85/80/80 —— 口径不同，**已统一为仓库脚本口径**，详见 `FULL_PROBLEM_LIST.md §回归基线三要素`） |
 | 禁区/越界契约 | `PYTHONPATH=src python3 tools/fix_verifiers/verify_p1_5_forbidden_zones.py` | **10/10** 通过（含 3 项 S-NEW 越界拒绝断言） |
-| 修复验证套件 | `PYTHONPATH=src python3 tools/fix_verifiers/run_all.py` | 6/6 通过（66 项断言） |
-| S-40/S-01/B8 护栏 | `PYTHONPATH=src python3 tools/fix_verifiers/verify_s40_s01_team.py` | 18/18 通过 |
-| 分部自检 | `python3 tools/hw_selftest.py --mock` | PASS=6 FAIL=0 SKIP=7 |
+| 修复验证套件 | `PYTHONPATH=src python3 tools/fix_verifiers/run_all.py` | **7/7 套通过**（新增第 7 套 `verify_s40_s01_team.py`） |
+| S-40/S-01/B8 护栏 | `PYTHONPATH=src python3 tools/fix_verifiers/verify_s40_s01_team.py` | **51 项断言通过，0 失败** |
+| 分部自检 | `python3 tools/hw_selftest.py --mock` | **PASS=7 FAIL=0 SKIP=7**（14 模块） |
 
 **注**：越界拒绝这条路径在集成仿真里**不会被触发**（仿真给的目标都在场内），
 所以仿真的绿色**不能**证明它有效——它的证据是 §4.2 的契约断言（`9000,9000 → False`）。
@@ -165,7 +165,8 @@ for seed in (1, 42, 123, 7, 2024):
     errs = [e for e in sim.events if "ERROR" in e]
     print(f"seed={seed:5d} score={sim.score:5d} delivered={len(delivered)} "
           f"valid={len(valid)} ERROR={len(errs)}")
-# 期望：score 80/80/85/80/80；delivered 7/7/8/7/7；valid == delivered；ERROR=0
+# 期望（基准口径，见 FULL_PROBLEM_LIST.md §回归基线三要素）：
+#   score 80/80/80/85/80；delivered 7/7/7/8/7；valid == delivered；ERROR=0
 ```
 
 ---
