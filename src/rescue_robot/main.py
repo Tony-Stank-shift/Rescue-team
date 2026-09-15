@@ -108,6 +108,10 @@ def main():
     except Exception as e:
         logger.warning(f"配置文件加载失败，使用默认参数: {e}")
 
+    # 提前声明：保证 finally 清理时一定存在（异常早退也不会 NameError）
+    chassis = None
+    camera = None
+
     try:
         # 创建硬件实例
         button, indicator, hw_checker = _create_hardware(run_mode)
@@ -271,6 +275,18 @@ def main():
             pass
         try:
             indicator.cleanup()
+        except Exception:
+            pass
+        # 停掉摄像头采集线程（否则线程/设备句柄泄漏）
+        try:
+            if camera is not None and hasattr(camera, "stop"):
+                camera.stop()
+        except Exception:
+            pass
+        # 关闭串口（释放 /dev/ttyS1，避免下次启动被占用）
+        try:
+            if chassis is not None and hasattr(chassis, "close"):
+                chassis.close()
         except Exception:
             pass
         logger.info("机器人已安全停止。")

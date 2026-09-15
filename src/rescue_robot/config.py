@@ -81,6 +81,37 @@ thresholds = Thresholds()
 
 
 # ============================================================
+# 摄像头几何（地平面测距：底边 + 相机倾角）
+# ============================================================
+class Camera:
+    """
+    相机安装几何 —— 地平面测距的输入参数。
+
+    测距原理（目标贴地时远优于面积法）：
+        f  = W / (2·tan(FOV/2))                 焦距(px)
+        α  = TILT + atan((y_bottom − H/2) / f)  视线俯角
+        d  = HEIGHT / tan(α)                    地面距离(mm)
+
+    ⚠️ TILT_DEG 是真机安装角度，**必须标定**：
+       把目标放在已知距离（如 500/1000/1500mm），量其检测框底边像素 y，
+       反解出倾角。倾角误差对远处距离影响很大。
+    """
+    HEIGHT_MM: float = 210.0      # 光心离地高度 (mm)
+    TILT_DEG: float = 30.0        # 下倾角（相对水平，向下为正）—— ⚠️ 待标定
+    FOV_DEG: float = 77.0         # 视场角（硬件：800W 77°）
+    RES: tuple = (640, 480)       # 处理分辨率 (W, H)
+
+
+camera = Camera()
+
+# 模块级别名（方便现场直接改 / getattr 读取）
+CAMERA_HEIGHT_MM = Camera.HEIGHT_MM
+CAMERA_TILT_DEG = Camera.TILT_DEG
+CAMERA_FOV_DEG = Camera.FOV_DEG
+CAMERA_RES = Camera.RES
+
+
+# ============================================================
 # 从 YAML 配置覆盖默认值（决赛创新实践环节现场修改，无需重编译）
 # ============================================================
 def apply_robot_config(cfg) -> None:

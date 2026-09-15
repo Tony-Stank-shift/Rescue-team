@@ -131,7 +131,11 @@ class CVDetector(AbstractDetector):
     6. 输出 Detection 列表
     """
 
-    def __init__(self, phase: CompetitionPhase = CompetitionPhase.PRELIMINARY):
+    def __init__(self, phase: CompetitionPhase = CompetitionPhase.PRELIMINARY,
+                 camera_height_mm: Optional[float] = None,
+                 camera_tilt_deg: Optional[float] = None,
+                 camera_fov_deg: Optional[float] = None,
+                 image_size: Optional[Tuple[int, int]] = None):
         self._phase = phase
         self._target_config = get_target_config(phase)
 
@@ -141,8 +145,23 @@ class CVDetector(AbstractDetector):
         # 最小轮廓面积（过滤噪点）
         self._min_contour_area = 200  # 像素²
 
+        # ── 相机几何（地平面测距用；默认取 config.Camera，可显式覆盖）──
+        from .. import config as _cfg
+        self._camera_height_mm = (camera_height_mm if camera_height_mm is not None
+                                  else getattr(_cfg, "CAMERA_HEIGHT_MM", 210.0))
+        self._camera_tilt_deg = (camera_tilt_deg if camera_tilt_deg is not None
+                                 else getattr(_cfg, "CAMERA_TILT_DEG", 30.0))
+        self._camera_fov_deg = (camera_fov_deg if camera_fov_deg is not None
+                                else getattr(_cfg, "CAMERA_FOV_DEG", 77.0))
+        self._image_size = tuple(image_size if image_size is not None
+                                 else getattr(_cfg, "CAMERA_RES", (640, 480)))
+
         logger.info(f"CVDetector 初始化: phase={phase.name}, "
-                     f"检测颜色={[c.name for c in self._colors_to_detect]}")
+                     f"检测颜色={[c.name for c in self._colors_to_detect]}, "
+                     f"相机 h={self._camera_height_mm:.0f}mm "
+                     f"tilt={self._camera_tilt_deg:.1f}° "
+                     f"fov={self._camera_fov_deg:.0f}° "
+                     f"res={self._image_size}")
 
     def _get_colors_to_detect(self) -> List[TargetColor]:
         """获取当前阶段需要检测的所有颜色"""
@@ -172,6 +191,15 @@ class CVDetector(AbstractDetector):
             # 旧实现在这里对 None 调 cv2.cvtColor 会抛异常，被主循环捕获后
             # 整轮 _run_once 被跳过 → 决策/导航/转运全不执行（表现为"原地去世"）。
             return []
+
+        # 用【真实帧尺寸】覆盖假设值：摄像头实际分辨率常常不是 config 里的假设值，
+        # 而地平面测距（焦距/主点）强依赖分辨率，尺寸错了距离会整体算错。
+        try:
+            _h, _w = frame.shape[:2]
+            if _w > 0 and _h > 0:
+                self._image_size = (int(_w), int(_h))
+        except Exception:
+            pass
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         detections = []
@@ -330,6 +358,44 @@ class CVDetector(AbstractDetector):
         y_mm = distance_mm * math.cos(angle_x) - camera_height_mm * 0.5
 
         return (x_mm, y_mm)
+
+    def estimate_ground_position(self,
+                                 center_x_px: float,
+                                 bottom_y_px: float,
+                                 image_size: Optional[Tuple[int, int]] = None,
+                                 ) -> Optional[Tuple[float, float]]:
+        """
+        底边 + 相机倾角的**地平面测距**（目标贴地时的正解）。
+
+        为什么不用面积法：目标形状不同（正方体/三棱锥/长方体/圆柱）在同一距离下
+        成像面积差异巨大，且受 HSV 阈值/光照/遮挡影响 → 距离不可用。
+        而"检测框底边"是目标与地面的接触线，配合已知相机高度与倾角，
+        由地平面几何即可解出距离，**与目标尺寸/形状无关**。
+
+        公式::
+
+            f  = W / (2·tan(FOV/2))                  焦距(px)
+            α  = TILT + atan((y_bottom − H/2) / f)   视线俯角
+            d  = HEIGHT / tan(α)                     地面距离(mm)
+            x  = d · (cx − W/2) / f                  横向偏移(mm)
+
+        Returns:
+            (x_mm, y_mm) 机器人坐标系（+y 前方 / +x 右方）；无法解算返回 None。
+        """
+        img_w, img_h = image_size or self._image_size
+        if img_w <= 0 or img_h <= 0:
+            return None
+        f = img_w / (2.0 * math.tan(math.radians(self._camera_fov_deg) / 2.0))
+        if f <= 0:
+            return None
+        alpha = (math.radians(self._camera_tilt_deg)
+                 + math.atan((bottom_y_px - img_h / 2.0) / f))
+        # 视线接近水平 → 距离发散（tan(α)→0），该帧拒绝（避免算出无穷远）
+        if alpha <= math.radians(1.0):
+            return None
+        d = self._camera_height_mm / math.tan(alpha)
+        x_off = (center_x_px - img_w / 2.0) / f * d
+        return (x_off, d)
 
 
 # ============================================================

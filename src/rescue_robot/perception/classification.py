@@ -82,6 +82,7 @@ class TargetClassifier:
             confidence=detection.confidence,
             timestamp=timestamp,
             pixel_position=detection.center_pixel,
+            pixel_bbox=detection.bbox,   # 保留真实检测框：地平面测距要用其底边
         )
 
     def classify_batch(self, detections: List[Detection],

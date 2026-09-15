@@ -122,8 +122,22 @@ class DetectedTarget:
     position: Tuple[float, float]   # 场地坐标 (x, y) mm
     confidence: float = 1.0
     timestamp: float = 0.0
-    pixel_position: Tuple[float, float] = (0, 0)  # 像素坐标
+    pixel_position: Tuple[float, float] = (0, 0)  # 像素坐标（检测框中心）
+    #: 真实检测框 (x, y, w, h)；地平面测距需要底边 y+h，故必须保留
+    pixel_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
     orientation: float = 0.0               # 目标朝向 (rad)，0=正对机器人
+
+    @property
+    def pixel_bottom(self) -> float:
+        """检测框底边像素 y（目标与地面的接触处，地平面测距用）。"""
+        _x, y, _w, h = self.pixel_bbox
+        return float(y + h)
+
+    @property
+    def has_pixel_bbox(self) -> bool:
+        """是否有有效的检测框（Mock/异常路径可能没有）。"""
+        _x, _y, w, h = self.pixel_bbox
+        return w > 0 and h > 0
 
 
 # ============================================================

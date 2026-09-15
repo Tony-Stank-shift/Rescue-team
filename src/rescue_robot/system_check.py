@@ -162,15 +162,18 @@ class RealHardwareChecker(HardwareChecker):
         if os.environ.get("SKIP_CAMERA_CHECK", "").strip().lower() in ("1", "true", "yes"):
             logger.info("SKIP_CAMERA_CHECK=1，跳过摄像头自检（台架调试）")
             return True
+        # 用后台采集线程探测（带超时），避免 BOOT 阶段被阻塞式 read() 卡住：
+        # 旧实现直接 cv2.VideoCapture + cap.read()，摄像头未就绪时会长时间阻塞自检。
         try:
-            import cv2
-            cap = cv2.VideoCapture(self._camera_index)
-            if not cap.isOpened():
+            from .hardware.camera_reader import CameraReader
+            cam = CameraReader(self._camera_index, name="cam-check")
+            if not cam.start():
                 return False
-            ok, _ = cap.read()
-            cap.release()
+            ok = cam.wait_first_frame(timeout=2.0)
+            cam.stop()
             return ok
-        except Exception:
+        except Exception as e:
+            logger.warning(f"摄像头自检异常: {e}")
             return False
 
     def check_imu(self) -> bool:

@@ -141,16 +141,28 @@ class PerceptionPipeline:
         )
 
         # ─── 步骤 3：位置估算 ───
+        # ① 首选：底边 + 相机倾角的【地平面测距】——目标贴地时准确且与形状无关；
+        #    旧实现此处传的是硬编码假框 Detection(bbox=(0,0,30,30))，导致
+        #    center_pixel=(15,15)、contour_area=0 → 距离恒为兜底值 500mm，视觉定位形同虚设。
+        # ② 兜底：面积法（仅当没有有效检测框 / 无法解算时使用，精度差）。
         for target in detected_targets:
-            pos = self._detector.estimate_position(
-                # 从 target.info 反查 detection（近似）
-                Detection(
-                    color=target.info.color,
-                    shape=target.info.shape,
-                    bbox=(0, 0, 30, 30),
-                    confidence=target.confidence,
-                ),
-            )
+            pos = None
+            if target.has_pixel_bbox and hasattr(self._detector,
+                                                 "estimate_ground_position"):
+                bx, by, bw, bh = target.pixel_bbox
+                pos = self._detector.estimate_ground_position(
+                    center_x_px=bx + bw / 2.0,
+                    bottom_y_px=by + bh,
+                )
+            if pos is None:
+                pos = self._detector.estimate_position(
+                    Detection(
+                        color=target.info.color,
+                        shape=target.info.shape,
+                        bbox=target.pixel_bbox,
+                        confidence=target.confidence,
+                    ),
+                )
             # 转换到场地坐标（机器人位置 + 相对位置）
             target.position = (
                 robot_position[0] + pos[0],
