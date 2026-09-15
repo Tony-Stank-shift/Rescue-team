@@ -27,7 +27,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .target_selector import TargetSelector, StrategyState, ScoredTarget
 from .anomaly_handler import (
@@ -101,6 +101,20 @@ class DecisionEngine:
     # 动作超时
     NAV_TIMEOUT_S = 10.0         # 导航超时
     GRIP_TIMEOUT_S = 3.0         # 夹取超时
+    #: ANOMALY 最长停留时间（秒）：超过则**强制恢复**原策略状态（T0-3 兜底）。
+    #: 为什么需要：ANOMALY 一旦成为"进得去出不来"的状态，决策层就永久只吐 WAIT，
+    #: 整场报废。宁可恢复后继续跑（并打 ERROR 让人看见），也不要永久停滞。
+    ANOMALY_MAX_S = 8.0
+    #: 判定"导航有进展"的距离阈值（mm）：离目标比历史最好值又近了这么多才算推进。
+    NAV_PROGRESS_MM = 20.0
+    #: 距目标多近就"不判超时"（mm）：套取半径 150mm 由转运层判定，这里留足余量。
+    NAV_NEAR_MM = 300.0
+    #: 超时窗口内**总位移**小于此值才算"几乎没动"（mm）。两条同时成立才放弃目标。
+    NAV_STUCK_MOVE_MM = 200.0
+    #: 被判"不可达"的目标在这个时间内不再被选中（秒），期间改为探索其它区域。
+    ABANDON_COOLDOWN_S = 30.0
+    #: 探索目标保持时间（秒）：期间复用同一个点，避免导航目标每帧跳变。
+    EXPLORE_HOLD_S = 8.0
     TRANSPORT_TIMEOUT_S = 15.0   # 运送超时
 
     def __init__(self,
@@ -142,6 +156,27 @@ class DecisionEngine:
         # （不能拿"任意目标靠近场心"当判据，见 _check_invalid_transport）
         self._delivered_ids: Set[int] = set()
         self._score = 0
+        # "场上暂无活跃目标"的告警只打一次（避免开局/掉线时刷屏；见 update() 的终场判定）
+        self._empty_map_warned = False
+        # T0-3：ANOMALY 的"原策略状态"与进入时刻（异常消失后归还 / 超时强制恢复）
+        self._anomaly_prev_state: Optional[StrategyState] = None
+        self._anomaly_since: Optional[float] = None
+        self._forced_prev_state: Optional[StrategyState] = None   # T2-6
+        # T1-8：导航"进展感知"超时用——记录选目标以来的**最近进展时刻**与最好距离。
+        # ⚠️ 不能用绝对超时：实测当前巡航速度只有 ~163mm/s，一趟 2.85m 要 22.3s，
+        # 绝对超时（NAV_TIMEOUT_S=10）会把**正常但慢**的导航全部误弃。
+        self._nav_best_dist: Optional[float] = None
+        self._nav_last_progress_ts: Optional[float] = None
+        # T1-8：已判定"到不了"的目标 id + 冷却截止时刻。必须记住它，否则同一帧就会
+        # 把它重新选中（实测：放弃后立刻重选同一个点 → 10 秒一次的"放弃→重选"空转）。
+        self._nav_prev_pose: Optional[tuple] = None
+        self._nav_move_accum: float = 0.0
+        self._abandoned_ids: set = set()
+        self._abandon_until: float = 0.0
+        # 探索点缓存：`_get_explore_target()` 每次调用都是**随机点**，
+        # 若每帧都重新取，导航目标会每帧跳变 → 车原地抖动、永远走不到。
+        self._explore_target: Optional[tuple] = None
+        self._explore_until: float = 0.0
 
         logger.info(f"DecisionEngine 初始化: my_color={my_color.name}")
 
@@ -175,6 +210,16 @@ class DecisionEngine:
         self._match_elapsed = 0.0
         self._strategy_state = StrategyState.FIRST_TRIP
         self._action_phase = ActionType.WAIT
+        self._anomaly_prev_state = None      # T0-3
+        self._anomaly_since = None
+        self._nav_best_dist = None           # T1-8
+        self._nav_last_progress_ts = None
+        self._nav_prev_pose = None
+        self._nav_move_accum = 0.0
+        self._abandoned_ids = set()
+        self._abandon_until = 0.0
+        self._explore_target = None
+        self._explore_until = 0.0
         logger.info("🏁 比赛开始! 状态=FIRST_TRIP")
 
     # ---- 主决策循环 ----
@@ -188,8 +233,10 @@ class DecisionEngine:
                contact_duration_s: float = 0.0,
                timestamp: Optional[float] = None,
                velocity: Optional[Tuple[float, float]] = None,
-               release_valid: bool = False,
-               delivered_ids: Optional[List[int]] = None) -> Action:
+               release_valid: Optional[bool] = None,
+               delivered_ids: Optional[List[int]] = None,
+               commanded_velocity: Optional[Tuple[float, float]] = None,
+               sensor_status: Optional[Dict[str, bool]] = None) -> Action:
         """
         单帧决策。
 
@@ -203,9 +250,14 @@ class DecisionEngine:
             timestamp: 时间戳
             release_valid: 最近一次投放是否为**有效投放**（目标落点在正确的
                 物资区/伤员区围栏内侧）。首趟只有有效才允许进入 FREE_RUN。
+                None = 旧行为（视为有效）——便于自测/旧调用方零改动接入。
             velocity: 由里程计位姿差算出的**实际**速度 (vx, vy) mm/s。
                 None = 上游没有运动学信息（仿真/单测）→ 内置"无动作"检测不启用；
                 真机必须传，否则异常链形同虚设。
+            commanded_velocity: 本帧**下发**的速度 (vx, vy) mm/s。
+                卡死检测需要"下发速度 vs 里程计位移"两路独立信息（见 anomaly_handler
+                的 T0-2）：只传 velocity（实际速度）时无法区分"真的卡住"与"正常行驶"。
+                None → 跳过卡死检测。
             delivered_ids: 上一趟**真正**送达的目标 id（来自
                 `TransportPipeline.delivered_target_ids`）。本趟**计划**可能多于
                 套取机构的物理容量（本车 = 1），没套上的目标必须留在场上等下一趟，
@@ -229,10 +281,53 @@ class DecisionEngine:
         anomaly = self._anomaly.check(
             robot_pose, velocity,
             imu_data, contact_duration_s,
+            commanded_velocity=commanded_velocity,
+            # T2-4：传感器健康状况（摄像头/IMU）。旧实现从不传 → `_sensor_status`
+            # 恒为全 True → `SENSOR_FAULT_CAMERA/IMU` 两个分支**永不触发**，
+            # 摄像头掉线在决策层"无人知晓"。
+            sensor_status=sensor_status,
         )
         if anomaly.type != AnomalyType.NONE:
+            # T0-3：进入 ANOMALY 前**记住原策略状态**，异常消失后归还。
+            # 旧实现只置 ANOMALY、从不还原 → 异常过后分派链全不匹配、落到
+            # `else: WAIT "未知状态"` **永久**（实测：异常消失 50 帧后仍 ANOMALY+WAIT），
+            # 叠加误判卡死（T0-2）就是"开车约 5 秒后整场报废"。
+            if self._strategy_state != StrategyState.ANOMALY:
+                self._anomaly_prev_state = self._strategy_state
+                self._anomaly_since = timestamp
             self._strategy_state = StrategyState.ANOMALY
+            # T0-3 兜底：ANOMALY 停留过久 → 强制恢复（否则可能永久只吐 WAIT）
+            if (self._anomaly_since is not None
+                    and timestamp - self._anomaly_since > self.ANOMALY_MAX_S):
+                restored = (StrategyState.FIRST_TRIP
+                            if self._strategy_state == StrategyState.FIRST_TRIP
+                            else StrategyState.FREE_RUN)
+                logger.error(
+                    f"⚠️ ANOMALY 已持续 {timestamp - self._anomaly_since:.0f}s"
+                    f"（>{self.ANOMALY_MAX_S:.0f}s）→ 强制恢复策略状态 {restored.name}，"
+                    f"避免决策层永久停滞（本次异常={anomaly.type.name}）")
+                self._strategy_state = restored
+                self._anomaly_prev_state = None
+                self._anomaly_since = None
             return self._handle_anomaly(anomaly, robot_pose)
+
+        # ── 异常已消失：从 ANOMALY 恢复（T0-3）──
+        if self._strategy_state == StrategyState.ANOMALY:
+            restored = self._anomaly_prev_state
+            if restored in (None, StrategyState.ANOMALY, StrategyState.DONE):
+                # 兜底：首趟未完成则回首趟，否则回 FREE_RUN。
+                # **不能**一律回 FREE_RUN —— 首趟未完成时那样会绕过"必须先单独送
+                # 1 个普通物资"的硬规则（按赛规整场无效）。
+                restored = (StrategyState.FIRST_TRIP
+                            if self._strategy_state == StrategyState.FIRST_TRIP
+                            else StrategyState.FREE_RUN)
+            logger.warning(f"✅ 异常已解除 → 恢复策略状态 {restored.name}"
+                           f"（不再停留在 ANOMALY）")
+            self._strategy_state = restored
+            self._anomaly_prev_state = None
+            self._anomaly_since = None
+        elif self._anomaly_since is not None:
+            self._anomaly_since = None
 
         # velocity 为 None（无运动学信息）时，保持"不启用内置无动作检测"的旧行为，
         # 避免在拿不到速度反馈的场景里误判；真机路径由 check() 内部按 speed>10 自行刷新。
@@ -251,10 +346,100 @@ class DecisionEngine:
             logger.info("比赛时间到!")
             return Action(type=ActionType.WAIT, detail="比赛结束")
 
-        if not self._world_map.active_targets:
-            self._strategy_state = StrategyState.DONE
-            logger.info("所有目标已清空!")
-            return Action(type=ActionType.WAIT, detail="所有目标已清空")
+        if not self._world_map.active_targets and not (grip_done or release_done):
+            # ⚠️⚠️ 这里**绝不能**判终场（DONE）—— 这是 S-01 修复暴露出来的 blocker。
+            #
+            # "当前帧检测列表为空" ≠ "场上没有可救援目标"。下列**常见**情况都会让
+            # `active_targets` 瞬间变空，而它们全都不是比赛结束：
+            #   1. 开局头几帧：感知要先攒够命中才建跟踪目标 → 地图本来就是空的；
+            #   2. 摄像头掉线/整帧无检测：`world_map.update([])` 每帧给所有目标
+            #      `track_lost_count + 1`，3 秒（MAX_LOST_COUNT=150）后**全部删除**；
+            #   3. 目标刚被套住 → 真机 `autonomous_state` 会把它标成 BEING_TRANSPORTED；
+            #   4. 刚投放成功 → 标成 IN_SAFE_ZONE。
+            #
+            # 旧实现据此置 DONE，而 **DONE 是单向的**（`grep '_strategy_state = '` 显示
+            # 没有任何分支能从 DONE 回到 FREE_RUN）。配合终场分支（清导航目标 + 停车 +
+            # `_stop_event.set()` 退出主循环）= **整场提前结束、不可恢复**。
+            # 最坏情况：开局第一帧地图为空 → t≈0 就停车退赛（0 分）。
+            #
+            # 赛规的结束条件（"救援目标被全部移至安全区内"）必须按**账面**判定，
+            # 不能按"这一帧的检测列表"判定 —— 后者受遮挡/掉线/光照影响极大。
+            # 因此：**只把"时间到"当硬终场**；场上暂无目标 → 保持当前策略、原地等待
+            # 重新检测（与修复前的行为一致，但不退出主循环、不置 DONE）。
+            #
+            # ⚠️⚠️ 但**必须**用 `grip_done/release_done` 门控（T0-1）：
+            # 目标一旦被套住就会被真机标成 BEING_TRANSPORTED，**不再计入 active_targets**。
+            # 若它是场上最后一个 ACTIVE 目标（开局只识别到 1 个，或清场时最后一趟），
+            # 早退 WAIT 会让决策层**永远到不了 TRANSPORT_TO** → 车带着目标原地不动、
+            # 一趟都送不进去（开局只建 1 个目标时 → 首趟永不完成 → 按赛规整场无效）。
+            # 手上/车上有货时**必须**继续走"运送→投放"分支。
+            if not self._empty_map_warned:
+                self._empty_map_warned = True
+                logger.warning(
+                    "场上暂无活跃目标 → 保持运行、原地等待重新检测"
+                    "（**不判终场**：摄像头掉线/开局未建图/目标在车上都会造成这种情况）")
+            return Action(type=ActionType.WAIT,
+                          detail="场上暂无目标：保持运行，等待重新检测")
+
+        # ─── T1-8：导航"不进展"超时 → 放弃当前目标（否则可整场卡在一个到不了的点上）──
+        # 旧实现：NAV_TIMEOUT_S 只在类里声明 + 被 config 赋值，**零引用** → 没有任何超时，
+        # 一旦当前目标不可达，决策层就会一直朝它发 NAVIGATE_TO（实测 300 帧全是
+        # `NAVIGATE_TO (3200,1500)`）。现在按"**离目标越来越近**"判进展：
+        # 连续 NAV_TIMEOUT_S 秒没有实质推进（≥ NAV_PROGRESS_MM）就放弃该目标重选。
+        # ⚠️ 判据必须是"**既不接近、又几乎没动**"两条同时成立，否则会误弃正常目标：
+        #    第一版只用"最近距离没再改进"就放弃，实测仿真里在 96mm/115mm/640mm 处
+        #    被大量误弃（车其实一直在正常机动，只是短时间内没有新的 20mm 改进）
+        #    → 集成仿真从 80 分/7 个掉到 21 分/3 个。**超时必须保守**。
+        if self._nav_prev_pose is not None:
+            self._nav_move_accum += math.hypot(rx - self._nav_prev_pose[0],
+                                               ry - self._nav_prev_pose[1])
+        self._nav_prev_pose = (rx, ry)
+
+        if self._current_target is not None and not nav_arrived:
+            tgt = self._current_target.position
+            d = math.hypot(tgt[0] - rx, tgt[1] - ry)
+            if d <= self.NAV_NEAR_MM:
+                # 已经在目标附近（套取半径由转运层判定）→ 不判超时，交给转运层
+                self._nav_best_dist = d
+                self._nav_last_progress_ts = timestamp
+                self._nav_move_accum = 0.0
+            elif (self._nav_best_dist is None
+                    or d < self._nav_best_dist - self.NAV_PROGRESS_MM):
+                self._nav_best_dist = d
+                self._nav_last_progress_ts = timestamp
+                self._nav_move_accum = 0.0
+            elif (self._nav_last_progress_ts is not None
+                  and timestamp - self._nav_last_progress_ts > self.NAV_TIMEOUT_S
+                  and self._nav_move_accum < self.NAV_STUCK_MOVE_MM):
+                bad_id = self._current_target.id
+                logger.error(
+                    f"⚠️ 导航 {timestamp - self._nav_last_progress_ts:.0f}s 无实质进展"
+                    f"（最好距离仍 {self._nav_best_dist:.0f}mm，目标 "
+                    f"({tgt[0]:.0f},{tgt[1]:.0f})）→ 放弃目标 #{bad_id}，"
+                    f"冷却 {self.ABANDON_COOLDOWN_S:.0f}s 并先去探索")
+                self._abandoned_ids.add(bad_id)
+                self._abandon_until = timestamp + self.ABANDON_COOLDOWN_S
+                self._current_target = None
+                self._trip_targets = []
+                self._nav_best_dist = None
+                self._nav_last_progress_ts = None
+                self._nav_move_accum = 0.0
+                return Action(type=ActionType.NAVIGATE_TO,
+                              target_position=self._explore_target_stable(rx, ry, timestamp),
+                              detail=f"目标 #{bad_id} 不可达 → 探索其它区域")
+        elif nav_arrived:
+            self._nav_best_dist = None
+            self._nav_last_progress_ts = None
+            self._nav_move_accum = 0.0
+
+        # T1-8：冷却期内**不再**朝"刚判不可达"的目标导航 —— 选择器可能又把它选回来
+        # （例如它就是最近的那个），必须在这里拦掉，否则会变成"放弃→重选"空转。
+        if (self._current_target is not None
+                and self._current_target.id in self._abandoned_ids
+                and timestamp < self._abandon_until):
+            return Action(type=ActionType.NAVIGATE_TO,
+                          target_position=self._explore_target_stable(rx, ry, timestamp),
+                          detail=f"目标 #{self._current_target.id} 冷却中 → 探索其它区域")
 
         # ─── 状态机 ───
         if self._strategy_state == StrategyState.FIRST_TRIP:
@@ -271,13 +456,24 @@ class DecisionEngine:
         elif self._strategy_state == StrategyState.DONE:
             return Action(type=ActionType.WAIT, detail="比赛完成")
         else:
-            return Action(type=ActionType.WAIT, detail="未知状态")
+            # T0-3 安全网：任何"没人处理"的策略状态都不允许永久卡住决策层。
+            # 旧实现直接 `WAIT "未知状态"`，一旦状态进入未知值（历史上 ANOMALY 就是）
+            # 就永久不动、且日志里看不出来。现在恢复到一个可工作的状态并打 ERROR。
+            restored = (StrategyState.FIRST_TRIP
+                        if self._strategy_state == StrategyState.FIRST_TRIP
+                        else StrategyState.FREE_RUN)
+            logger.error(f"⚠️ 未知策略状态 {self._strategy_state.name} → "
+                         f"恢复为 {restored.name}（避免决策层永久 WAIT）")
+            self._strategy_state = restored
+            return self._handle_free_run(rx, ry, nav_arrived, grip_done,
+                                         release_done, release_valid,
+                                         delivered_ids)
 
     # ---- FIRST_TRIP ----
 
     def _handle_first_trip(self, rx: float, ry: float,
                            nav_arrived: bool, grip_done: bool,
-                           release_done: bool, release_valid: bool = False,
+                           release_done: bool, release_valid: Optional[bool] = None,
                            delivered_ids: Optional[List[int]] = None) -> Action:
         """处理首次转运状态"""
         # 选择目标
@@ -324,6 +520,18 @@ class DecisionEngine:
                 target_position=safe_region,
                 detail="FIRST_TRIP: 运送至物资区",
             )
+
+        # ⚠️ N-8：漏传 `release_valid` 必须**失败关闭（fail-closed）**，不能静默放行。
+        # 首趟闸门是"投歪则首趟不算完成、后续全部无效"这条赛规的唯一守护；
+        # 若某调用点忘了传参就放行，等于把守护悄悄摘掉（现场表现为"投歪也算首趟成功"）。
+        # 因此 None → `False`（判无效、重做首趟），并打 ERROR 让人看见。
+        # ⚠️ 注意这与 `delivered_ids` 的 None 语义**故意不同**：那个 None=不丢目标（宽松），
+        #    这个 None=判无效（严格）。合规闸门必须偏严格。
+        if release_valid is None:
+            logger.error("未提供 release_valid（投放有效性）→ 按**无效**处理（fail-closed）。"
+                         "请让调用方显式传入投放判定结果；"
+                         "真机路径 autonomous_state 与仿真 integrated_sim 都已显式传参。")
+            release_valid = False
 
         # ── 首趟完成判定 ──
         # 规则：出发后必须把**一个普通物资单独送到本队安全区物资区围栏内侧**，
@@ -392,7 +600,7 @@ class DecisionEngine:
 
     def _handle_free_run(self, rx: float, ry: float,
                          nav_arrived: bool, grip_done: bool,
-                         release_done: bool, release_valid: bool = False,
+                         release_done: bool, release_valid: Optional[bool] = None,
                          delivered_ids: Optional[List[int]] = None) -> Action:
         """处理自由转运状态"""
         # 检测转运无效恢复
@@ -460,6 +668,12 @@ class DecisionEngine:
             self._trip_targets = []
             return Action(type=ActionType.WAIT, detail="投放无效，重选目标")
 
+        if release_valid is None:
+            # N-8：与首趟分支一致，**失败关闭**。自由趟里"漏传就当成有效"会让
+            # `mark_in_safe_zone` 把实际没投进区的目标记成已运走 → 幻影送达（与 S-40 同类）。
+            logger.error("未提供 release_valid（投放有效性）→ 按**无效**处理（fail-closed）")
+            release_valid = False
+
         for t in self._trip_targets:
             # S-40：只给**真正送达**的目标记账。本趟计划里没套上的（机构容量限制）
             # 必须留在场上，否则被当成"已运走"→ 永不重选 → 永久丢分。
@@ -486,15 +700,29 @@ class DecisionEngine:
 
         裁判将机器人放回出发区后调用。
         """
+        # T2-6：记住分离前的策略状态，恢复时归还（而不是无条件 FREE_RUN）
+        if self._strategy_state != StrategyState.FORCED_RESET:
+            self._forced_prev_state = self._strategy_state
         self._strategy_state = StrategyState.FORCED_RESET
         # 保留当前目标和进度
         logger.warning(f"强制分离! 重置位姿到 ({new_pose[0]:.0f}, {new_pose[1]:.0f})")
         # 不清除 _current_target — 恢复后继续
 
     def _handle_forced_reset(self) -> Action:
-        """处理强制分离恢复"""
-        self._strategy_state = StrategyState.FREE_RUN
-        logger.info("强制分离恢复完成，继续运行")
+        """处理强制分离恢复（T2-6）。
+
+        ⚠️ 旧实现**无条件** `= FREE_RUN`：若此时首趟尚未有效完成，就等于绕过
+        "首趟必须先单独送 1 个普通物资到物资区围栏内侧"这条硬规则（按赛规整场无效）。
+        现在恢复**分离前**的策略状态（默认回首趟）。
+        """
+        prev = self._forced_prev_state
+        if prev in (None, StrategyState.ANOMALY, StrategyState.DONE,
+                    StrategyState.FORCED_RESET):
+            prev = StrategyState.FIRST_TRIP
+        self._strategy_state = prev
+        self._forced_prev_state = None
+        logger.info(f"强制分离恢复完成 → 恢复到策略状态 {prev.name}"
+                    f"（不无条件回 FREE_RUN，避免绕过首趟闸门）")
         if self._current_target:
             return Action(
                 type=ActionType.NAVIGATE_TO,
@@ -538,7 +766,8 @@ class DecisionEngine:
             self._anomaly.start_escape()
             self._last_action_time = time.time()
             # 脱困必须有真实运动：给一个探索点让导航驱动底盘，而不是干等
-            pos = self._get_explore_target(robot_pose[0], robot_pose[1])
+            # 用稳定探索点：异常持续期间本函数每帧都会被调用，用随机点会让目标每帧跳变
+            pos = self._explore_target_stable(robot_pose[0], robot_pose[1])
             logger.warning(f"脱困中: {report.detail} → 驶向 ({pos[0]:.0f}, {pos[1]:.0f})")
             return Action(type=ActionType.NAVIGATE_TO,
                           target_position=pos,
@@ -557,16 +786,29 @@ class DecisionEngine:
     # ---- 区域位置 ----
 
     def _check_fallback_needed(self, rx: float, ry: float, action: Action) -> bool:
-        """检查是否需要降级"""
+        """检查是否需要降级。
+
+        ⚠️ T2-5：本方法**当前没有任何调用方**，且 `_fallback_level` 只被写、从不被读
+        → 这套"10s 探索 / 13s 保命"的分级降级阶梯**实际不生效**。
+        真正生效的保活/降级链在 `states/autonomous_state.py::_check_watchdog`
+        （>10s 无位移 → `navigation.explore()`；>13s → `survival_circle()`，都会产生真实运动，
+        并有 T1-10 的"保活优先窗口"防止被决策引擎逐帧覆盖）。
+
+        保留本方法是为了**不留陷阱**：① 修掉原先两处 `if` 的顺序错误
+        （`>10` 在前直接 return 导致 `>13` 分支**永不可达**）；② 明确标注"未接线"，
+        避免后来人以为已有三级降级保护。
+        """
         if action.type == ActionType.WAIT:
             idle_time = time.time() - self._last_action_time
-            if idle_time > 10:
-                self._fallback_level = FallbackLevel.EXPLORE
-                logger.warning("10s无动作 → 探索模式")
-                return True
+            # 顺序修正：先判更严重的（保命），再判探索
             if idle_time > 13:
                 self._fallback_level = FallbackLevel.SURVIVAL
-                logger.warning("13s无动作 → 保命模式!")
+                logger.warning("13s无动作 → 保命模式（注意：本分支未被调用，"
+                               "实际保活见 autonomous_state._check_watchdog）")
+                return True
+            if idle_time > 10:
+                self._fallback_level = FallbackLevel.EXPLORE
+                logger.warning("10s无动作 → 探索模式（注意：本分支未被调用）")
                 return True
         else:
             self._last_action_time = time.time()
@@ -574,6 +816,25 @@ class DecisionEngine:
                 self._fallback_level = FallbackLevel.NORMAL
                 logger.info("恢复运动 → 降级解除")
         return False
+
+    def _explore_target_stable(self, rx: float, ry: float,
+                               timestamp: float = None) -> tuple:
+        """返回一个**在一段时间内保持不变**的探索点。
+
+        为什么需要：`_get_explore_target()` 内部是 `random.randint`，每调一次就变一个点。
+        决策层是 50Hz 调用的 → 若每帧都取新点，导航目标每帧跳变，车会在原地抖动、
+        永远走不到任何地方（与"保活链被逐帧覆盖"是同一类问题，见 T1-10）。
+        """
+        if timestamp is None:
+            timestamp = time.time()
+        near = (self._explore_target is not None and
+                math.hypot(self._explore_target[0] - rx,
+                           self._explore_target[1] - ry) < 150.0)
+        if (self._explore_target is None or near
+                or timestamp >= self._explore_until):
+            self._explore_target = self._get_explore_target(rx, ry)
+            self._explore_until = timestamp + self.EXPLORE_HOLD_S
+        return self._explore_target
 
     def _get_explore_target(self, rx: float, ry: float) -> tuple:
         """生成探索目标：场地中央 + 随机偏移（排除安全区内的点）。"""
@@ -719,12 +980,31 @@ if __name__ == "__main__":
     assert action.type == ActionType.TRANSPORT_TO
     print("  ✅ 通过")
 
-    # 测试 4：投放完成 → FREE_RUN
-    action = engine.update((200, 2800, 0), nav_arrived=True, grip_done=True, release_done=True)
+    # 测试 4：投放完成（**有效投放**）→ FREE_RUN
+    # ⚠️ 必须显式传 release_valid=True：这是"首趟有效投放"的唯一判据。
+    #    漏传会按 fail-closed 判为无效（见 N-8 与测试 4b）。
+    action = engine.update((200, 2800, 0), nav_arrived=True, grip_done=True,
+                           release_done=True, release_valid=True)
     print(f"\n测试 4: 投放后 state={engine.strategy_state.name}")
     assert engine.strategy_state == StrategyState.FREE_RUN, \
         f"应进入FREE_RUN，实际={engine.strategy_state.name}"
     print("  ✅ 通过")
+
+    # 测试 4b：漏传 release_valid 必须**失败关闭**（N-8），不得静默放行首趟闸门
+    eng_probe = DecisionEngine(WorldMap(field_layout=FieldLayout.standard()),
+                              my_color=SafeZoneColor.RED)
+    eng_probe.start_match()      # 必须：否则 _match_start_time=0 → 时间判定直接判 DONE
+    eng_probe._world_map._create_new_target(
+        DetectedTarget(id=1, info=next(iter(PRELIMINARY_TARGETS.values())),
+                       position=(1000, 1500)), 0.0)
+    eng_probe.update((1000, 1500, 0), nav_arrived=True)
+    eng_probe.update((1000, 1500, 0), nav_arrived=True, grip_done=True)
+    eng_probe.update((200, 2800, 0), nav_arrived=True, grip_done=True,
+                     release_done=True)          # ← 故意不传 release_valid
+    print(f"\n测试 4b: 漏传 release_valid 后 state={eng_probe.strategy_state.name}")
+    assert eng_probe.strategy_state == StrategyState.FIRST_TRIP, \
+        f"漏传 release_valid 时不得放行首趟闸门，实际={eng_probe.strategy_state.name}"
+    print("  ✅ 通过（fail-closed）")
 
     # 测试 5：FREE_RUN 选择最高分（伤员）
     action = engine.update((200, 2800, 0))

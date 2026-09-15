@@ -11,6 +11,7 @@ transport_pipeline.py —— 转运主控管线
 """
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -134,11 +135,15 @@ class TransportPipeline:
 
         # 套取失败重试（抬爪 + 后退 + 重新接近），超过次数才放弃本趟
         self._capture_retries = 0
+        self._place_correct_tries = 0         # 投放位调整次数（N-6/N-7）
         self._violation = Violation.NONE      # 本趟违规类型（用于 VIOLATION 自恢复日志）
 
         # 注入项（由 AutonomousState 绑定真机硬件）：
         self._stop_cb = None        # 显式停车回调（套取前必须让底盘真停）
         self._sleeve_confirm = None  # 套取视觉确认回调（本车无硬件套住传感器）
+        # T1-5/T1-7：投放被判无效 / 本趟作废时，回调上层把目标状态放回 ACTIVE，
+        # 否则目标永久停在 BEING_TRANSPORTED → 永不被重选（永久丢分 / 首趟无法重做）。
+        self._release_failed_cb = None
         self._confirm_fail_streak = 0   # 视觉确认连续失败次数（用于自动失效保护）
         self.MAX_CONFIRM_FAILS = 5      # 连续失败多少此后自动关闭视觉确认
 
@@ -219,6 +224,10 @@ class TransportPipeline:
     #: ⚠️ 这是 S-40 防线的关键：只有车真的在该目标处才允许记入，
     #:    绝不"隔着几米把没套到的目标算作已送达"。
     CAPTURE_RADIUS_MM = 150.0
+    #: 到达投放点后，为让**真实落点**进入本队子区域，允许调整车位的次数（N-6/N-7）。
+    MAX_PLACE_CORRECT = 3
+    #: 距投放点多近开始要求朝向对准（mm）。T1-4：越早对齐，落点越稳。
+    DROP_ALIGN_DIST_MM = 500.0
 
     def is_idle(self) -> bool:
         return self._phase in (TransportPhase.IDLE, TransportPhase.COMPLETE)
@@ -228,6 +237,18 @@ class TransportPipeline:
     def set_stop_callback(self, fn) -> None:
         """注入"立即停车"回调（绑定到串口底盘的 send_stop）。"""
         self._stop_cb = fn
+
+    def set_release_failed_callback(self, fn) -> None:
+        """注入"本趟目标没真正送达"的回调：fn(List[TrackedTarget]) → None。"""
+        self._release_failed_cb = fn
+
+    def _notify_release_failed(self, targets) -> None:
+        if self._release_failed_cb is None or not targets:
+            return
+        try:
+            self._release_failed_cb(list(targets))
+        except Exception as e:
+            logger.warning(f"投放失败回调异常: {e}")
 
     def set_sleeve_confirm(self, fn) -> None:
         """注入"槽内是否有目标"的视觉确认回调（无硬件套住传感器时使用）。
@@ -331,6 +352,7 @@ class TransportPipeline:
         self._place_step = 0
         self._capture_retries = 0
         self._confirm_fail_streak = 0
+        self._place_correct_tries = 0
 
         names = [t.info.description for t in targets]
         logger.info(f"开始转运 (第{self._load_mgr.trip_number}趟): "
@@ -359,6 +381,10 @@ class TransportPipeline:
             consequence, _ = self._load_mgr.get_violation_info(self._violation)
             logger.error(f"本次转运作废（{self._violation.name}: {consequence}）→ "
                          f"清空本趟目标，回到 IDLE 重新规划")
+            # T1-5/T1-7：作废本趟时必须同时清掉"已装载"台账，并把目标放回场上，
+            # 否则它们永远停在 BEING_TRANSPORTED（既不可选、又占着货舱容量）。
+            self._notify_release_failed(self._captured or self._current_targets)
+            self._load_mgr.discard_load()
             self._current_targets.clear()
             self._captured.clear()
             self._capture_index = 0
@@ -497,7 +523,26 @@ class TransportPipeline:
             # 物资区/伤员区中心）：到达投放点附近才投放，避免在安全区边缘提前释放。
             if nav is not None and nav.target is not None:
                 dist = self._distance((rx, ry), nav.target)
+                # T1-4：接近投放点时要求**朝向对准投放点**（落点 = 车心 + L·朝向，
+                # 朝向错则落点错 → 投歪 -10 分/个）。导航会在"位置到了但朝向不对"时
+                # 原地对准，对准后才算到达。
+                if dist < self.DROP_ALIGN_DIST_MM and hasattr(nav, "require_final_heading"):
+                    tx_, ty_ = nav.target
+                    nav.require_final_heading(math.atan2(ty_ - ry, tx_ - rx))
                 if dist < 80:  # 到达投放点（窄安全区 300 高，容差收紧保证投放准确）
+                    # ── N-7/N-6：到达投放点后，先按**真实落点**确认车姿合适 ──
+                    # 落点 = 车心 + L·朝向，朝向是自由变量；车停在区域中心时落点可能
+                    # 被推到围栏外。这里用"钳制点 − 真实落点"算出**车需要挪动的位移**
+                    # （钳制**只用于瞄准**），挪到位后再进 PLACING。
+                    # ⚠️ 绝不能用钳制点做判定：那样 classify 的 ON_FENCE/OUTSIDE/
+                    #    WRONG_* 分支永不可达 → 投放有效性恒为 True → B3 首趟闸门失效。
+                    if (not self._drop_inside(rx, ry, rtheta)
+                            and self._place_correct_tries < self.MAX_PLACE_CORRECT):
+                        if self._nudge_to_valid_drop(rx, ry, rtheta, nav):
+                            return self._get_status()      # 仍在 TRANSPORTING，等挪到位
+                    # 进入投放前解除"朝向要求"，避免后续阶段因朝向判定卡住
+                    if hasattr(nav, "clear_final_heading"):
+                        nav.clear_final_heading()
                     self._phase = TransportPhase.PLACING
                     logger.debug(f"到达投放点: dist={dist:.0f}mm")
 
@@ -536,14 +581,33 @@ class TransportPipeline:
             # 目标在车头 U 型槽内（前伸 L≈DROP_FORWARD_MM），释放瞬间它落在车身前方，
             # 用 (rx,ry) 判会系统性偏移一个 L —— 投对了被判无效（丢分/首趟失败），
             # 投错了被判有效（首趟"假成功"→ 按规则后续全部无效）。
-            drop_pt = self.drop_position((rx, ry, rtheta))
+            # N-6：落点还要**投影钳回本队该类型子区域**内 —— 红方物资区 y 向只有 300mm
+            # （完全置入可用 280mm），而落点 = 车心 + L·朝向；从场地内部朝安全区接近时
+            # 朝向指向围栏 → 落点被推到围栏上判 `ON_FENCE` → 首趟大概率无效。
+            # 实测：车心停在区域中心时，9 个朝向里原本 4 个判无效，投影钳制后**全部有效**。
+            base_drop = self.drop_position((rx, ry, rtheta))
             # S-40：投放判定/计分只针对**真正装在车上**的目标（`_captured`），
             # 不是本趟计划。用计划会让"没带上的目标"也按投对计分（虚高分）。
             dropped = self._captured or list(self._current_targets)
-            positions = [drop_pt] * len(dropped)
             infos = [t.info for t in dropped]
+            # N-7【必须按**真实落点**判定】：绝不能用 `clamp_into_area()` 的结果去判定 ——
+            # 钳制点按构造就落在"该类型应有的区域内侧"，会让 classify 的
+            # ON_FENCE / OUTSIDE / WRONG_SUPPLY_IN_INJURED 等分支**永不可达**，
+            # 投放有效性恒为 True（实测：场地中央 / 紫围栏南侧 / **对方安全区** /
+            # 伤员区放物资 / 场外西侧 全部被判 valid）→
+            #   ① B3「首趟必须投进物资区围栏内侧」闸门被反向废掉（投歪当成功 → 按赛规
+            #      后续全部转运无效）；
+            #   ② 计分虚高（与 S-40 同类的"谎报"）；
+            #   ③ 赛规 -10 分/个的"物资入伤员区"永远不可见。
+            # 钳制只用于**瞄准**（见 TRANSPORTING 里的 `_nudge_to_valid_drop`）。
+            positions = [base_drop] * len(dropped)
             results = self._placer.classify_batch(positions, infos)
             all_valid = all(r.is_valid for r in results)
+            # ⚠️ 曾有建议把判定放宽为"落点有效 **或** 车身位置有效"（INCREMENTAL_AUDIT N-6
+            #    建议②），**已否决**：物体实际落在 drop_pt（车身前方 L 处），车身在区域内
+            #    而落点在围栏上 = 物体真的落在围栏上。放宽判定会把这种"真错误"判成有效
+            #    → 首趟**假成功** → 按规则后续全部无效，比判无效更糟。
+            #    正确做法是把落点本身修对（见上面 clamp_into_area + YAML drop_forward_mm）。
 
             if hasattr(self._sleeve, 'place_ramp'):
                 released = self._sleeve.place_ramp()
@@ -560,6 +624,10 @@ class TransportPipeline:
                     bad = [r for r in results if not r.is_valid]
                     for r in bad:
                         logger.warning(f"投放位置错误: {r.detail}")
+                    # T1-5/T1-7：投放被判无效 → 目标其实还在场上（或被裁判重放场心），
+                    # 必须放回可选中状态，否则永久丢分；首趟场景下还会导致
+                    # "首趟永远无法重做"→ 按赛规整场无效。
+                    self._notify_release_failed(dropped)
 
                 self._phase = TransportPhase.COMPLETE
                 # 记住"本趟真正送达了什么"，供决策引擎精确标记（只标真的送到的）
@@ -605,6 +673,7 @@ class TransportPipeline:
         self._place_step = 0
         self._capture_retries = 0
         self._confirm_fail_streak = 0
+        self._place_correct_tries = 0
         self._violation = Violation.NONE
         self._total_trips = 0
         self._total_targets_delivered = 0
@@ -619,6 +688,51 @@ class TransportPipeline:
         )
 
     # ---- 工具 ----
+
+    def _drop_inside(self, rx: float, ry: float, rtheta: float) -> bool:
+        """按**真实落点**判断本趟所有在车目标是否都落在各自区域的内侧。
+
+        ⚠️ 绝不能用 `clamp_into_area()` 的结果来做这个判断（那会让判定恒真，
+        见 N-7）。本方法只用未钳制的 `drop_position()`。
+        """
+        base = self.drop_position((rx, ry, rtheta))
+        for t in (self._captured or self._current_targets):
+            if not self._placer.classify(base, t.info).is_valid:
+                return False
+        return True
+
+    def _nudge_to_valid_drop(self, rx: float, ry: float, rtheta: float, nav) -> bool:
+        """落点不在区内时，算出让落点**进入区内**所需的车位调整量并下发（N-6/N-7）。
+
+        这里 `clamp_into_area()` 只用来**瞄准**：它给出"最近的可接受落点"，与真实
+        落点之差就是车需要平移的位移（车平移 Δ，落点也平移 Δ）。到位后再按**真实
+        落点**重新判定。
+
+        Returns:
+            True=已下发调整（调用方应留在 TRANSPORTING 等到位）；False=无法调整
+        """
+        current = self._captured or self._current_targets
+        if not current:
+            return False
+        info = current[0].info          # 容量=1 时只有一个；多目标同区域
+        base = self.drop_position((rx, ry, rtheta))
+        want = self._placer.clamp_into_area(base, info)
+        dx, dy = want[0] - base[0], want[1] - base[1]
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return False
+        self._place_correct_tries += 1
+        tx, ty = rx + dx, ry + dy
+        try:
+            if not nav.set_target(tx, ty):
+                logger.warning(f"投放位调整目标被拒（越界）：({tx:.0f},{ty:.0f})")
+                return False
+        except Exception as e:
+            logger.warning(f"投放位调整失败: {e}")
+            return False
+        logger.info(f"落点不在区内 → 调整车位 {dx:+.0f},{dy:+.0f}mm 到 "
+                    f"({tx:.0f},{ty:.0f})（第 {self._place_correct_tries}/"
+                    f"{self.MAX_PLACE_CORRECT} 次）")
+        return True
 
     def drop_position(self, pose: Tuple[float, float, float]) -> Tuple[float, float]:
         """

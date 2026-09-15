@@ -154,9 +154,11 @@ class ForbiddenZoneManager:
     # RectRegion.contains 是闭区间（px <= x_max 才算在内），所以必须 > 0，
     # 否则会"推出到边界上"仍被判为在禁区内，形成死循环。
     CLAMP_EPS_MM = 1.0
+    #: 钳制位移超过此值就打 WARNING（T1-2：旧实现曾静默把目标挪 1400mm 到场地中心）
+    CLAMP_WARN_MM = 200.0
 
     def clamp_to_safe(self, x: float, y: float,
-                      margin_mm: float = 0.0) -> Tuple[float, float]:
+                      margin_mm: float = 0.0) -> Optional[Tuple[float, float]]:
         """
         把落在 hard 禁区内的点推到禁区外最近的合法位置。
 
@@ -166,30 +168,49 @@ class ForbiddenZoneManager:
 
         多禁区重叠时迭代推出（最多 8 次）；仍无法推出时退到场地中心一带。
         """
+        # ── T1-2：改为"候选点里取最近合法点"，不再靠逐禁区弹跳 + 场地中心兜底 ──
+        #
+        # 旧实现的问题（实测）：对方安全区外扩 50mm 后与最外圈"边界安全带"**重叠 20mm**，
+        # 逐矩形推出时会在"安全带 ↔ 安全区"之间来回弹 8 次，最后走兜底 **返回场地中心**
+        # —— 实测 `(1500,100) → (1500,1500)` 位移 **1400mm**，而 `set_target` 仍返回 True。
+        # 车于是开去一个完全无关的位置，且调用方拿不到"你的点被换了 1.4 米"的信号。
+        #
+        # 现在：把所有 hard 禁区的**外扩边界**作为候选点集合，筛掉仍违法的，
+        # 取距原目标最近的那个；一个都没有就返回 None，由调用方**明确拒绝**。
         eps = max(margin_mm, self.CLAMP_EPS_MM)
-        for _ in range(8):
-            zone = self.check_violation(x, y)
-            if zone is None:
-                return (x, y)
-            r = zone.region
-            candidates = [
-                (r.x - eps, y),                 # 往左推出
-                (r.x + r.width + eps, y),       # 往右推出
-                (x, r.y - eps),                 # 往下推出
-                (x, r.y + r.height + eps),      # 往上推出
-            ]
-            nxt = min(candidates, key=lambda p: (p[0] - x) ** 2 + (p[1] - y) ** 2)
-            if nxt == (x, y):
-                break
-            x, y = nxt
+        if self.check_violation(x, y) is None and self.is_in_field(x, y):
+            return (x, y)
 
-        # 兜底：推到场地中心；若中心也在禁区内则取场地四分之一处
-        for fallback in ((FIELD_SIZE / 2, FIELD_SIZE / 2),
-                         (FIELD_SIZE * 0.25, FIELD_SIZE * 0.25)):
-            if self.check_violation(*fallback) is None:
-                logger.error(f"目标点无法推出禁区，回退到 {fallback}")
-                return fallback
-        return (x, y)
+        cands: List[Tuple[float, float]] = []
+        for zone in self._zones:
+            if not zone.is_hard:
+                continue
+            r = zone.region
+            cands += [
+                (r.x - eps, y), (r.x + r.width + eps, y),     # 左/右推出
+                (x, r.y - eps), (x, r.y + r.height + eps),    # 下/上推出
+            ]
+            # 四个角也作为候选，处理"斜向被推出"的情形
+            cands += [
+                (r.x - eps, r.y - eps),
+                (r.x + r.width + eps, r.y - eps),
+                (r.x - eps, r.y + r.height + eps),
+                (r.x + r.width + eps, r.y + r.height + eps),
+            ]
+        legal = [(cx, cy) for (cx, cy) in cands
+                 if self.is_in_field(cx, cy) and self.check_violation(cx, cy) is None]
+        if legal:
+            bx, by = min(legal, key=lambda p: (p[0] - x) ** 2 + (p[1] - y) ** 2)
+            moved = ((bx - x) ** 2 + (by - y) ** 2) ** 0.5
+            if moved > self.CLAMP_WARN_MM:
+                logger.warning(f"目标点 ({x:.0f},{y:.0f}) 在禁区内 → 钳制到最近的合法点 "
+                               f"({bx:.0f},{by:.0f})，位移 {moved:.0f}mm")
+            return (bx, by)
+
+        # 找不到合法点：**明确失败**，绝不静默把目标搬到场地中心
+        logger.error(f"目标点 ({x:.0f},{y:.0f}) 落在禁区内且找不到可用的合法替代点 → "
+                     f"拒绝钳制（由调用方拒绝该目标）")
+        return None
 
     def get_violation_warning(self, x: float, y: float,
                               warning_distance_mm: float = 150.0) -> Optional[ForbiddenZone]:

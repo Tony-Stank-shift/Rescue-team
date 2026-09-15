@@ -93,7 +93,11 @@ class Placement:
       ⚠️ 仅当机构组确认"槽内可同时容纳多个且行进中不脱落"时才可调大；
          调大后必须先回归集成仿真（决策引擎 grip_done 耦合需同步调整）。
     """
-    DROP_FORWARD_MM: float = 150.0
+    # N-6：150mm 太大 —— 红方物资区 y 向只有 300mm（完全置入可用 280mm），
+    # L=150 已占 54%，落点被推到围栏上 → 首趟有效投放接近抛硬币。
+    # 实测（车心停在区域中心、L=150）：9 个朝向里 4 个判 ON_FENCE/超界；
+    # L=70 且落点投影钳回子区域后，**所有朝向都有效**。仍是真机标定项。
+    DROP_FORWARD_MM: float = 70.0
     PUSH_DIST_MM: float = 100.0
     SLEEVE_MAX_HOLD: int = 1
 
@@ -243,8 +247,25 @@ def apply_robot_config(cfg) -> None:
         MotionController.PID_ANGLE = (mot.pid_angle.kp, mot.pid_angle.ki,
                                       mot.pid_angle.kd)
         MotionController.DEFAULT_MAX_LINEAR_SPEED = float(mot.max_speed_mm_s)
+        # T2-3：局部避障器必须用**同一个**限速源，否则 YAML 限速被它旁路
+        from .navigation.path_planner import LocalPlanner
+        LocalPlanner.DEFAULT_MAX_LINEAR_SPEED = float(mot.max_speed_mm_s)
         MotionController.DEFAULT_MAX_ANGULAR_SPEED = float(mot.max_angular_speed_rad_s)
+        LocalPlanner.DEFAULT_MAX_ANGULAR_SPEED = float(mot.max_angular_speed_rad_s)
         MotionController.DEFAULT_WHEEL_BASE_MM = float(mot.wheel_base_mm)
+
+    # ── 策略权重：接到目标选择器（T2-14，原来 YAML 里写了也不生效）──
+    #    注入方式与上面 `TargetSelector.TIME_PRESSURE_S` 一致（类属性）。
+    #    ⚠️ 映射保证"默认值下与旧公式逐位等价"，详见 TargetSelector 的类文档字符串。
+    sw = getattr(cfg, "strategy_weights", None)
+    if sw is not None:
+        from .decision.target_selector import TargetSelector
+        TargetSelector.set_weights(
+            distance_weight=getattr(sw, "distance_weight", None),
+            points_weight=getattr(sw, "points_weight", None),
+            time_weight=getattr(sw, "time_weight", None),
+            opponent_factor=getattr(sw, "opponent_factor", None),
+        )
 
     logger.info(
         "已应用 YAML 配置: match.duration=%ss, time_pressure=%ss, "
@@ -253,3 +274,6 @@ def apply_robot_config(cfg) -> None:
         AnomalyHandler.WATCHDOG_WARN_S, AnomalyHandler.WATCHDOG_TIMEOUT_S,
         Placement.DROP_FORWARD_MM, Thresholds.PLACEMENT_PENALTY_PER_TARGET,
     )
+    if sw is not None:
+        logger.info("策略权重已接线到 TargetSelector: %s",
+                    TargetSelector.get_weights())

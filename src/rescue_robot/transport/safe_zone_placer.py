@@ -236,6 +236,37 @@ class SafeZonePlacer:
             return self._my_safe_zone.region
         return None
 
+    def target_area_region(self, info) -> Optional[RectRegion]:
+        """本队**该目标类型对应**的子区域（物资区 / 伤员区）。
+
+        用途：把"预测落点"钳回本队子区域内（N-6）。红方物资区 y 向只有 300mm
+        （完全置入可用 280mm），而落点 = 车心 + L·朝向；从场地内部朝安全区接近时
+        朝向指向围栏，落点会被推到围栏上 → 判 `ON_FENCE` → 投放无效。
+        """
+        from ..perception.target_types import TargetType
+        if getattr(info, "type", None) == TargetType.INJURED:
+            return self._my_injured_area.region if self._my_injured_area else None
+        return self._my_supply_area.region if self._my_supply_area else None
+
+    def clamp_into_area(self, position: Tuple[float, float],
+                        info) -> Tuple[float, float]:
+        """把落点**投影**到该类型子区域的内缩矩形内（N-6）。
+
+        为什么不改成"放宽判定"就算了：目标必须**完全落进**围栏内侧才算有效投放
+        （赛规），落点被算到围栏外说明**车停的位置/朝向本身不合适**，物体会真的
+        落在围栏上。投影钳制把"预测落点"拉回可用范围内，等价于要求车停得更靠内，
+        既不冤枉正确投放、也不会把目标扔到围栏上。
+
+        区域不可用时原样返回（由调用方按原落点判定）。
+        """
+        region = self.target_area_region(info)
+        if region is None:
+            return position
+        m = self.FULLY_INSIDE_MARGIN_MM
+        x = min(max(position[0], region.x + m), region.x + region.width - m)
+        y = min(max(position[1], region.y + m), region.y + region.height - m)
+        return (x, y)
+
     def set_my_color(self, color: SafeZoneColor) -> None:
         self._my_color = color
         self._cache_zones()

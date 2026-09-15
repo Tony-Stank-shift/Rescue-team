@@ -115,7 +115,15 @@ class MotionController:
 
     # 越障参数
     BUMP_SPEED_MM_S = 200.0             # 越障速度
-    BUMP_CROSS_TIME_S = 1.0             # 单根减速带通过时间
+    BUMP_CROSS_TIME_S = 1.0             # 单根减速带通过时间（仅诊断用）
+    #: 越障需要实际驶过的距离（mm）。3 条减速带 + 间距 + 车长 ≈ 450mm。
+    #: ⚠️ 退出条件必须按**里程**算，不能按墙钟（T0-4）：主循环被套取/投放阻塞时
+    #: 墙钟仍在走 → 会在**没跨过减速带**时就退出；反之卡在减速带上时会永远重入。
+    BUMP_TRAVEL_MM = 450.0
+    #: 越障最长持续时间（秒）——兜底，防止里程因堵转不增长而永远停在 bump 模式。
+    BUMP_MAX_S = 8.0
+    #: 越障期间的角速度限幅（rad/s）：低速纠偏可以，但不许原地打转蹭减速带。
+    BUMP_MAX_ANGULAR_RAD_S = 0.6
 
     # 限速 / 轮距（可由 YAML robot.motors.* 覆盖，config.apply_robot_config 注入）
     DEFAULT_MAX_LINEAR_SPEED = 850.0
@@ -156,6 +164,7 @@ class MotionController:
         self._is_bump_mode = False
         self._bump_timer = 0.0
         self._bump_count = 0
+        self._bump_travel_mm = 0.0      # 越障期间累计里程（按它判退出，T0-4）
 
         logger.info(f"MotionController 初始化: max_v={max_linear_speed}mm/s, "
                      f"max_w={max_angular_speed}rad/s")
@@ -165,7 +174,8 @@ class MotionController:
     def compute_velocity(self,
                          target: Tuple[float, float],
                          current_pose: Tuple[float, float, float],
-                         dt: float = 0.02) -> VelocityCommand:
+                         dt: float = 0.02,
+                         align_heading: Optional[float] = None) -> VelocityCommand:
         """
         计算到达目标点所需的速度指令。
 
@@ -193,6 +203,18 @@ class MotionController:
         # 已到达？
         if distance < self.POSITION_TOLERANCE_MM:
             self._pid_distance.reset()
+            # T1-4：到位时若要求指定朝向（投放对准），**不能直接零速收工** ——
+            # 旧实现无条件返回 (0,0)，于是"到达"可以在朝向完全不对时成立，
+            # 而投放落点 = 车心 + L·朝向 → 朝向错则落点错（投歪 -10 分/个）。
+            # 现在：位置到了但朝向没对 → 原地只给角速度，对准了再算到达。
+            if align_heading is not None:
+                herr = self._normalize_angle(align_heading - ctheta)
+                if abs(herr) > self.ANGLE_TOLERANCE_RAD:
+                    ang = self._pid_angle.compute(herr, 0.0, dt)
+                    ang = max(-self._max_w, min(self._max_w, ang))
+                    self._current_command = VelocityCommand(
+                        linear=0.0, angular=ang, timestamp=time.time())
+                    return self._current_command
             self._pid_angle.reset()
             return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())
 
@@ -216,7 +238,8 @@ class MotionController:
                    path: list,
                    current_pose: Tuple[float, float, float],
                    lookahead_idx: int = 2,
-                   dt: float = 0.02) -> VelocityCommand:
+                   dt: float = 0.02,
+                   align_heading: Optional[float] = None) -> VelocityCommand:
         """
         跟踪路径（纯追踪）。
 
@@ -228,7 +251,8 @@ class MotionController:
         target_idx = min(lookahead_idx, len(path) - 1)
         target = path[target_idx]
 
-        return self.compute_velocity(target, current_pose, dt)
+        return self.compute_velocity(target, current_pose, dt,
+                                     align_heading=align_heading)
 
     # ---- 越障模式 ----
 
@@ -237,22 +261,45 @@ class MotionController:
         self._is_bump_mode = True
         self._bump_timer = time.time()
         self._bump_count = 0
+        self._bump_travel_mm = 0.0
         logger.info("进入越障模式 — 即将通过减速带")
 
     def exit_bump_mode(self) -> None:
         """退出越障模式"""
         self._is_bump_mode = False
-        logger.info(f"退出越障模式 — 通过了 {self._bump_count} 根减速带")
+        logger.info(f"退出越障模式 — 越过 {self._bump_travel_mm:.0f}mm "
+                    f"（折算约 {self._bump_count} 根减速带）")
 
-    def compute_bump_velocity(self, dt: float = 0.02) -> VelocityCommand:
-        """越障模式下的速度指令（恒速直线）"""
-        elapsed = time.time() - self._bump_timer
-        # 每根减速带约 1 秒
-        self._bump_count = int(elapsed / self.BUMP_CROSS_TIME_S)
+    @property
+    def bump_finished(self) -> bool:
+        """本次越障是否已完成：按**里程**判，另有最长时长兜底（T0-4）。
+
+        ⚠️ 旧实现用 `int((now - _bump_timer)/1.0) >= 3`（墙钟）：主循环被套取/投放
+        阻塞时墙钟照走 → 没跨过就退出；而 `enter_bump_mode()` 又把计时清零，
+        于是只要还在减速带附近就**反复重入**，每轮直线冲 600mm 且 `angular=0` 不看目标。
+        """
+        if self._bump_travel_mm >= self.BUMP_TRAVEL_MM:
+            return True
+        return (time.time() - self._bump_timer) > self.BUMP_MAX_S
+
+    def compute_bump_velocity(self, dt: float = 0.02,
+                              angular: float = 0.0) -> VelocityCommand:
+        """越障模式下的速度指令（恒速前进 + 有限纠偏）。
+
+        Args:
+            angular: 由导航给出的朝向修正（rad/s），会被限幅到
+                ``BUMP_MAX_ANGULAR_RAD_S``。旧实现恒为 0 → 越障全程**无视目标方向**，
+                车头朝哪就朝哪冲（可能撞围栏/直入对方安全区）。
+        """
+        self._bump_travel_mm += abs(self.BUMP_SPEED_MM_S) * dt
+        # 折算"越过了几根"（每根 110mm = 深 60 + 间 50）——仅用于日志/诊断
+        self._bump_count = int(self._bump_travel_mm / 110.0)
+        ang = max(-self.BUMP_MAX_ANGULAR_RAD_S,
+                  min(self.BUMP_MAX_ANGULAR_RAD_S, float(angular)))
 
         return VelocityCommand(
             linear=self.BUMP_SPEED_MM_S,
-            angular=0.0,
+            angular=ang,
             timestamp=time.time(),
         )
 
@@ -283,6 +330,7 @@ class MotionController:
         self._pid_angle.reset()
         self._is_bump_mode = False
         self._bump_count = 0
+        self._bump_travel_mm = 0.0
 
     # ---- 工具 ----
 

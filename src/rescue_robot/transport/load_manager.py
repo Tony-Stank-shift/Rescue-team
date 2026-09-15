@@ -247,6 +247,16 @@ class LoadManager:
         total_count = self._state.count + len(targets)
 
         # 规则 1：首次转运必须且仅转运 1 个普通物资
+        #
+        # ⚠️ 曾经考虑过"解除首趟对其它批次的连带封杀"（见 INCREMENTAL_AUDIT 的 N-6 建议①），
+        # **实测证明那是空操作**：本判据与"只在本批含非普通物资时拒绝"逐项等价
+        # （[1普通]通过；[2普通]、[普通+核心] → MULTI；[1核心]、[1伤员] → WRONG_TYPE），
+        # 因为规则本身就是"首趟必须且仅送 1 个普通物资，完成后才能碰核心/伤员"，
+        # **不能放宽**（放宽 = 直接违规）。
+        # 所以 N-6 的正解不是改这里，而是**让首趟真的成功**：
+        # 落点投影钳回本队子区域（transport_pipeline PLACING）+ 前伸量默认值降到与
+        # 区域几何相容（YAML `drop_forward_mm`）。首趟成功率上去了，本分支自然不再是
+        # "永久封杀"。
         if self.is_first_trip:
             if total_count != 1:
                 return (False, Violation.FIRST_TRIP_MULTI)
@@ -379,6 +389,24 @@ class LoadManager:
         return VIOLATION_CONSEQUENCES.get(
             violation, ("未知违规", False)
         )
+
+    def discard_load(self) -> List[int]:
+        """作废当前装载（清空货舱但不计趟次、不计分）。
+
+        T1-5/T1-7：本趟被判作废（VIOLATION）或投放无效时，目标其实仍在场上，
+        不能让它们留在"已装载"台账里（否则容量/首趟判定被污染，且目标状态永远
+        停在 BEING_TRANSPORTED）。与 `release_all()` 的区别：**不 +1 趟、不结算分数**。
+        """
+        ids = sorted(self._state.target_ids)
+        if not ids:
+            return []
+        logger.warning(f"作废当前装载（不计趟次）: {ids}")
+        self._state.targets = []
+        self._state.target_ids = set()
+        self._state.count = 0
+        self._state.has_injured = False
+        self._state.has_dangerous = False
+        return ids
 
     def reset(self) -> None:
         """完全重置（新比赛开始）"""

@@ -40,7 +40,17 @@ robot:
     max_angular_speed_rad_s: 3.0
     wheel_base_mm: 209
 
-  # 策略权重 (影响 DecisionEngine 和 TargetSelector)
+  # 策略权重 —— **这里才是生效的那一份**（T2-14）：
+  # 由 config.apply_robot_config() 注入 TargetSelector，现场改完保存即生效。
+  #   distance_weight  ↑ → 更强调"就近"（=0 → 距离不参与）
+  #   points_weight    ↑ → 更强调分值（=0.5 为基准；↑ → 更愿意跑远拿高分）
+  #   time_weight      ↑ → 更早进入时间紧迫模式、末段加成更强（=0 → 时间不参与）
+  #   opponent_factor  ↓ → 对方盯上的目标被压得更狠（=1.0 → 完全不避让）
+  # ⚠️ 下面这 4 个值就是"与旧公式等价"的基准值，别随手改：
+  #    改大改小都会真的改变选目标行为 → 必须重跑 5 种子集成仿真回归。
+  # ⚠️ `config/strategy/{default,aggressive,conservative}.yaml` 里的
+  #    strategy_weights 是**死配置**（没有任何生产代码读取那三个文件，
+  #    唯一的引用方 innovation/hot_reloader.py 自身也无调用方）→ 改那里无效。
   strategy_weights:
     distance_weight: 0.3
     points_weight: 0.5
@@ -69,7 +79,11 @@ robot:
   placement:
     # 释放瞬间目标（在车头 U 型槽内）相对车心的前伸距离(mm)：
     # 投放有效性判定用它把"车身位置"换算成"目标落点"。必须真机标定。
-    drop_forward_mm: 150.0
+    # ⚠️ N-6：不能太大。红/蓝物资区 y 向只有 300mm、完全置入可用 280mm，
+    #    150mm 已占 54% → 落点被推到围栏上 → 首趟有效投放接近抛硬币
+    #    （实测车心停在区域中心时 9 个朝向里 4 个判无效）。默认降到 70。
+    #    现场实测"目标放进 U 型槽后车心到目标的前伸距离"再改这里。
+    drop_forward_mm: 70.0
     # 推式放置时朝斜坡方向的推入距离(mm)，同样需真机标定。
     push_dist_mm: 100.0
     # ❓ 该数值来源不明：赛项 PDF 只写"无效目标被取出重新随机放置场地中央"，

@@ -1,3 +1,11 @@
+# ⛔ 本文件当前【未被任何生产代码读取】—— 改它无效、而且不会报错！
+#
+# 唯一引用方 `innovation/hot_reloader.py` 自身没有任何生产调用方（grep 全仓确认）。
+# 本文件的 target_selection / fallback / opponent 三段同样无消费点。
+#
+# ✅ 生效的策略权重请改 `config/robot.default.yaml` 的 `robot.strategy_weights`
+#    （已在 T2-14 接线到 TargetSelector，改那里真的会生效）。
+
 # ============================================================
 # conservative.yaml —— 保守稳定策略
 #

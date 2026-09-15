@@ -272,7 +272,56 @@ class CVDetector(AbstractDetector):
                     orientation=orient,
                 ))
 
-        return detections
+        return self._suppress_overlapping(detections)
+
+    @staticmethod
+    def _suppress_overlapping(detections: "List[Detection]",
+                              iou_thr: float = 0.45,
+                              center_thr_px: float = 12.0) -> "List[Detection]":
+        """同一物理物体在多颜色掩码重叠区会被检出**多次** → 去重（T2-17）。
+
+        为什么必须去重：`LIGHT_BLUE` 与 `BLUE` 的 HSV 桶在 H∈[95,110] 区间重叠，
+        而 `detect()` 对每种颜色**独立**跑掩码并把结果全部 append，代码注释声称
+        "顺序特殊色在前"就防住了 —— 实际上顺序**只决定谁先命中，不能阻止后者再命中**。
+        实测：一块饱和浅蓝面同时产出 `LIGHT_BLUE` 与 `BLUE` 两个 Detection，
+        经分类器可能变成"危险目标 + 核心物资"两个目标进世界地图 →
+        最坏是**把危险目标当救援目标搬**（赛项违规）。
+
+        做法：保留先出现的（即 `_get_colors_to_detect()` 排好序的**高优先级**颜色），
+        抑制与它 bbox 高度重叠 / 中心过近的后继检测。
+        """
+        kept = []
+        for det in detections:
+            dup = False
+            for k in kept:
+                if CVDetector._iou(det.bbox, k.bbox) >= iou_thr or \
+                   CVDetector._center_dist(det.bbox, k.bbox) <= center_thr_px:
+                    dup = True
+                    break
+            if not dup:
+                kept.append(det)
+        if len(kept) != len(detections):
+            logger.debug(f"颜色重叠去重: {len(detections)} → {len(kept)} 个检测")
+        return kept
+
+    @staticmethod
+    def _iou(a, b) -> float:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        x1, y1 = max(ax, bx), max(ay, by)
+        x2, y2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        inter = (x2 - x1) * (y2 - y1)
+        union = aw * ah + bw * bh - inter
+        return inter / union if union > 0 else 0.0
+
+    @staticmethod
+    def _center_dist(a, b) -> float:
+        import math as _m
+        acx, acy = a[0] + a[2] / 2.0, a[1] + a[3] / 2.0
+        bcx, bcy = b[0] + b[2] / 2.0, b[1] + b[3] / 2.0
+        return _m.hypot(acx - bcx, acy - bcy)
 
     def _create_color_mask(self, hsv, color: TargetColor):
         """为指定颜色创建 HSV 掩码"""

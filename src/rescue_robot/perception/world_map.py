@@ -421,6 +421,26 @@ class WorldMap:
             self._targets[target_id].status = TargetStatus.IN_SAFE_ZONE
             logger.info(f"目标已入安全区: ID={target_id}")
 
+    def return_to_field(self, target_id: int) -> None:
+        """把目标状态**放回 ACTIVE**（"它又回到场上了"）。
+
+        T1-5/T1-7：旧实现全仓只有 →`IN_SAFE_ZONE` 与 →`BEING_TRANSPORTED` 两条赋值，
+        **没有任何回写 ACTIVE 的路径**。于是"套取后没真正送达"的目标（投放被判无效、
+        途中掉落、本趟作废）会永久停在 `BEING_TRANSPORTED`：
+          · `get_regular_supplies()/get_core_supplies()/get_injured()` 全部过滤掉它
+            → **永久不可选**（那个 5/10/15 分直接丢掉）；
+          · 若它是场上仅有/最后的普通物资 → **首趟永远无法重做** → 按赛规整场无效。
+        现在由转运管线在"投放无效 / 本趟作废"时显式回边，决策层即可重新选中它。
+        """
+        t = self._targets.get(target_id)
+        if t is None:
+            return
+        before = t.status.name
+        t.status = TargetStatus.ACTIVE
+        t.track_lost_count = 0
+        logger.warning(f"目标回到场上（可重新选择）: ID={target_id} "
+                       f"{before} → ACTIVE，位置=({t.position[0]:.0f},{t.position[1]:.0f})")
+
     def mark_being_transported(self, target_id: int) -> None:
         """标记目标正在被转运"""
         if target_id in self._targets:

@@ -72,6 +72,11 @@ class AnomalyHandler:
     WATCHDOG_CRITICAL_S = 13.0       # 13s临界（触发保命）
     STUCK_TIME_S = 5.0               # 卡死判定时间
     STUCK_DISTANCE_MM = 30.0         # 卡死判定距离（此距离内无移动=卡死）
+    #: 卡死检测：下发速度超过此值才算"要求它动"（mm/s）。
+    STUCK_CMD_MIN_MM_S = 50.0
+    #: 卡死检测：单帧位移下限（mm）。低于它视为"没有实际移动"，滤掉里程计抖动。
+    #: ⚠️ 判据必须"下发速度"对比"里程计位移"（两路独立信息），见 check() 第 4 步。
+    STUCK_STEP_MIN_MM = 1.0
     ACCEL_ANOMALY_THRESHOLD = 30.0   # 加速度异常阈值 (m/s²)
     GYRO_ANOMALY_THRESHOLD = 10.0    # 角速度异常阈值 (rad/s)
 
@@ -103,7 +108,8 @@ class AnomalyHandler:
               velocity: Optional[Tuple[float, float]] = None,
               imu_data: Optional[dict] = None,
               contact_duration_s: float = 0.0,
-              sensor_status: Optional[Dict[str, bool]] = None) -> AnomalyReport:
+              sensor_status: Optional[Dict[str, bool]] = None,
+              commanded_velocity: Optional[Tuple[float, float]] = None) -> AnomalyReport:
         """
         综合异常检测。
 
@@ -111,6 +117,9 @@ class AnomalyHandler:
             robot_pose: (x, y, theta)
             velocity: **实际**速度 (vx, vy) mm/s（由里程计位姿差算出）。
                 None = 上游没有运动学信息 → 跳过"无动作"检测（绝不凭猜测判无动作）。
+            commanded_velocity: 本帧**下发**的速度 (vx, vy) mm/s（导航的速度指令）。
+                卡死检测需要它：只有"下发了速度"且"里程计不动"才是真卡死。
+                None → 跳过卡死检测（仿真/单测默认，绝不凭空判卡死）。
         Returns:
             AnomalyReport: 异常报告（无异常时 type=NONE）
         """
@@ -119,6 +128,10 @@ class AnomalyHandler:
 
         timestamp = time.time()
         rx, ry, rtheta = robot_pose
+        # 兜底初始化（N-1）：下方卡死检测在 `velocity is not None` 分支**之外**
+        # 也会用到 speed；当前已在守卫内使用，但显式初始化可防止日后有人挪动判断
+        # 顺序时出现 NameError（velocity=None 时决策引擎默认就会这么调）。
+        speed = 0.0
 
         # 1. "无动作"检测（仅在拿到真实速度反馈时启用）
         # 旧实现由调用方传字面量 (0,0) → speed 恒 0；且调用方每帧 notify_action()
@@ -179,22 +192,39 @@ class AnomalyHandler:
                 RecoveryAction.DEGRADE_SENSORS, False,
             )
 
-        # 4. 卡死检测（"电机在转但位置不变"）——需要真实速度反馈才能判定，
-        #    没有 velocity 时跳过，避免用未知信息误判。
+        # 4. 卡死检测（"下发了速度但里程计不动"）
+        #
+        # ⚠️⚠️ 必须用**两路独立信息**：① 本帧下发的速度（导航要它动）
+        #     ② 里程计**实际位移**（它到底动没动）。
+        #
+        # 旧实现（T0-2，已修）拿"由位姿差算出的 speed"与"当前帧位姿差 dist"相比
+        # —— 两者是**同一个量的相邻两帧**，于是 dt=0.02 时"每帧位移落在 (2,30)mm"
+        # 就同时满足 `speed>100` 与 `dist<30`，而那正是 **100~1500mm/s 的正常行驶**：
+        # 实测 300mm/s 正常直行，**t=5.03s 被判"卡死 5.0s"**（车实际走了 1878mm）。
+        # 该误判随后会经 ANOMALY 状态把决策层永久锁死（T0-3）→ 整场报废。
+        #
+        # 现在：只有"确实下发了速度"且"里程计几乎没动"才累计卡死时间。
+        # `commanded_velocity=None`（仿真/单测未提供）→ 跳过本检测，绝不凭空判卡死。
         current_pos = (rx, ry)
-        if velocity is not None and self._last_position is not None:
+        if (commanded_velocity is not None and velocity is not None
+                and self._last_position is not None):
+            cmd_speed = math.sqrt(commanded_velocity[0] ** 2
+                                  + commanded_velocity[1] ** 2)
             dist = math.sqrt(
                 (current_pos[0] - self._last_position[0]) ** 2 +
                 (current_pos[1] - self._last_position[1]) ** 2
             )
-            if speed > 100 and dist < self.STUCK_DISTANCE_MM:
-                # 电机在转但位置不变 → 卡死
+            wants_to_move = cmd_speed > self.STUCK_CMD_MIN_MM_S
+            actually_moved = dist >= self.STUCK_STEP_MIN_MM
+            if wants_to_move and not actually_moved:
+                # 要求它动、里程计却不动 → 真的卡住（打滑/顶住/编码器失效）
                 if self._stuck_start_time is None:
                     self._stuck_start_time = timestamp
                 elif timestamp - self._stuck_start_time > self.STUCK_TIME_S:
                     return self._report(
                         AnomalyType.STUCK,
-                        f"卡死 {timestamp - self._stuck_start_time:.1f}s",
+                        f"卡死 {timestamp - self._stuck_start_time:.1f}s"
+                        f"（下发 {cmd_speed:.0f}mm/s，里程计位移 {dist:.2f}mm/帧）",
                         RecoveryAction.ESCAPE_MANEUVER, False,
                     )
             else:

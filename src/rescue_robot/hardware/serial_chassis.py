@@ -23,8 +23,10 @@ serial_chassis.py —— 上位机 ↔ 下位机(STM32) 串口底盘驱动
 里程计、地图坐标转换、出发区全局偏移、IMU 零偏校准与融合由上位机负责。
 
 设备文件：
-  - 电脑调试（USB-TTL）：/dev/ttyUSB0
-  - RDK 部署：/dev/ttyS0（待确认具体 UART）
+  - 电脑调试（USB-TTL）：/dev/ttyUSB0（用 CHASSIS_PORT 覆盖）
+  - RDK X5 部署：**/dev/ttyS1 @115200 —— 已真机实测确认**
+    （PING→PONG、ODOM/IMU/TEL 遥测正常、VEL,200 实测 200.1mm/s）；
+    代码默认值就是 /dev/ttyS1，RDK 上不需要显式导出 CHASSIS_PORT。
 """
 
 import logging
@@ -66,6 +68,9 @@ class SerialChassis:
         # 统计
         self._bytes_tx = 0
         self._frames_rx = 0
+        # 共享接收缓冲：所有读取接口都从这里取整行，保证不丢数据（见 T0-6）
+        self._rx_buf = b""
+        self._rx_lines_dropped = 0          # 被丢弃的非位姿行（诊断用）
 
     # ---- 生命周期 ----
 
@@ -85,6 +90,15 @@ class SerialChassis:
         return True
 
     def close(self) -> None:
+        # T1-9：关串口前先发一次停车。否则"最后一帧 VEL"会留在下位机里，
+        # 只能靠它的 800ms 速度看门狗停下（850mm/s 下最多再冲 ~0.68m）。
+        # 用 VEL,0,0 + STOP 而非 ESTOP：后者会锁定板子且 START 无法解除（协议 §4.4）。
+        if self.is_open:
+            try:
+                self._send("VEL,0,0")
+                self._send("STOP")
+            except Exception as e:
+                logger.warning(f"关串口前停车失败: {e}")
         if self._ser is not None:
             try:
                 self._ser.close()
@@ -168,10 +182,39 @@ class SerialChassis:
 
     # ---- 接收（下行） ----
 
+    def _pump_rx(self) -> None:
+        """把串口当前**全部**可用字节搬进接收缓冲（非阻塞，不等待）。"""
+        if not self.is_open:
+            return
+        try:
+            waiting = int(getattr(self._ser, "in_waiting", 0) or 0)
+            if waiting > 0:
+                self._rx_buf += self._ser.read(waiting)
+        except Exception as e:
+            logger.debug(f"串口读取失败: {e}")
+
+    def _pop_line_buffered(self) -> Optional[str]:
+        """只从接收缓冲取一整行；缓冲里没有整行就返回 None（**绝不阻塞**）。"""
+        self._pump_rx()
+        if b"\n" not in self._rx_buf:
+            return None
+        line, _, rest = self._rx_buf.partition(b"\n")
+        self._rx_buf = rest
+        return line.decode("ascii", errors="ignore").strip()
+
+    @property
+    def rx_lines_dropped(self) -> int:
+        """被丢弃的非位姿行数（T0-6 诊断：正常比赛它会持续增长，属预期）。"""
+        return self._rx_lines_dropped
+
     def _read_line(self) -> Optional[str]:
         """读一行原始文本（strip）；无数据/未打开返回 None。"""
         if not self.is_open:
             return None
+        # 先看共享缓冲有没有整行（T0-6：缓冲由所有读取接口共用，避免互相"偷吃"数据）
+        buffered = self._pop_line_buffered()
+        if buffered is not None:
+            return buffered
         try:
             line = self._ser.readline()
         except Exception as e:
@@ -206,13 +249,40 @@ class SerialChassis:
             return frame
         return None
 
+    #: 单帧最多排空多少行（防止极端积压时把主循环拖住）
+    MAX_LINES_PER_FRAME = 64
+
     def read_pose(self) -> Optional[Tuple[float, float, float]]:
+        """读**最新**的 ODOM 位姿（排空接收缓冲，只保留最后一条有效 ODOM）。
+
+        ⚠️⚠️ T0-6：旧实现每帧只 `readline()` **一行**且不排空缓冲，而按协议下位机
+        持续发送 ODOM 20Hz + IMU 50Hz + TEL 5~10Hz = **75~80 行/秒**，上位机 50Hz
+        主循环只消费 **50 行/秒** → 每秒净积压 25~30 行，非 ODOM 行被直接丢弃且不补读
+        → **控制回路用的是过期位姿**（位姿越来越旧），进安全区/贴围栏/套取对准全部
+        按过期坐标执行。现在一次把缓冲里**所有**整行取出来，只保留最后一条 ODOM。
         """
-        读一行并仅解析合法的 ODOM 位姿（上层 mm 坐标）；无数据/无 ODOM 返回 None。
-        """
-        text = self._read_line()
-        if not text or not text.upper().startswith('ODOM'):
+        if not self.is_open:
             return None
+
+        latest: Optional[str] = None
+        for _ in range(self.MAX_LINES_PER_FRAME):
+            text = self._pop_line_buffered()       # 非阻塞，缓冲无整行即返回 None
+            if text is None:
+                break
+            if text.upper().startswith('ODOM'):
+                latest = text
+            else:
+                self._rx_lines_dropped += 1
+        if latest is None:
+            # 缓冲里这一帧没有 ODOM（例如刚开机/掉线）→ 回退到一次阻塞读，保持原语义
+            text = self._read_line()
+            if text and text.upper().startswith('ODOM'):
+                latest = text
+            elif text:
+                self._rx_lines_dropped += 1
+        if latest is None:
+            return None
+        text = latest
         frame = self.parse_frame(text)
         if frame is None:
             return None
@@ -257,10 +327,24 @@ class SerialChassis:
         注：下位机 command.c 按钮按下时发 `EVENT,START_BUTTON`；
         自锁开关拨动另有 `EVENT,BUTTON_LED_ON/OFF`（此处忽略）。
         """
-        text = self._read_line()
-        if text and text.upper().startswith("EVENT,START_BUTTON"):
-            return text
-        return None
+        # T0-7：DEBUG 阶段也持续收到 75~80 行/秒遥测，而本函数由主循环每 0.5s 才调一次。
+        # 旧实现只读一行 → 消费 2 行/秒，缓冲在 1~3 秒内积压饱和并开始丢字节，
+        # 而 `EVENT,START_BUTTON` 是**一次性事件**（协议 §5.1.1），丢了就永不匹配
+        # → 按了开关进不了 AUTONOMOUS。现在排空缓冲，并在整批里找该事件。
+        found = None
+        for _ in range(self.MAX_LINES_PER_FRAME):
+            text = self._pop_line_buffered()
+            if text is None:
+                break
+            if text.upper().startswith("EVENT,START_BUTTON"):
+                found = text
+            elif text:
+                self._rx_lines_dropped += 1
+        if found is None:
+            text = self._read_line()
+            if text and text.upper().startswith("EVENT,START_BUTTON"):
+                found = text
+        return found
 
     def parse_frame(self, text: str) -> Optional[dict]:
         """

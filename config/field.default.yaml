@@ -1,5 +1,28 @@
 # ============================================================
-# field.default.yaml —— 场地默认参数配置
+# ⛔⛔ 本文件当前【未被任何生产代码读取】—— 改它无效！ ⛔⛔
+#
+# 现场按本文件改出发区 / 安全区 / 禁区边距 / 减速带，**不会有任何效果**，
+# 而且**不会报错**（旧文档让人以为改这里就生效，属于"改了不生效还不报错"）。
+#
+# 场地几何的真值来源（改这里才生效，需要改代码 / 重编译）：
+#   src/rescue_robot/perception/field_elements.py::StandardFieldLayout
+#     · 出发区        → StandardFieldLayout._build_layout() 的 START_ZONE_*
+#     · 安全区/物资区/伤员区 → 同文件 SAFE_ZONE_* / SUPPLY_AREA_* / INJURED_AREA_*
+#     · 禁区边距/减速带 → 同文件 FORBIDDEN_* / SPEED_BUMP_*
+#   main.py 用的是 `FieldLayout.standard()`（= StandardFieldLayout），
+#   本文件只在 `FieldConfig.from_yaml()`（生产零调用方）里会被解析。
+#
+# 另外注意：本文件里的数值**与代码实际几何并不一致**（例如本文件写
+# `safe_zones.red.x=1200,y=2670`，而 `config_loader.FieldConfig` 的默认值是
+# `x=50,y=2550`，StandardFieldLayout 又是第三套值）。所以它既不是真值来源，
+# 也不能当作"场地参考值"来比对 —— 不要再照着它调参，也不要照它写文档。
+#
+# 结论（T2-12 的处置方案 b）：保留文件仅供离线工具/测试使用，并在头部与
+# `config_loader.FieldConfig` 的文档字符串里**双向标注"未被读取"**。
+# 真要把 YAML 接成真值（方案 a），必须改 main.py 的 FieldLayout.standard()
+# 调用点 + 回归 5 种子集成仿真（本轮修复范围明确禁止改 main.py）。
+# ============================================================
+# field.default.yaml —— 场地默认参数配置（⚠️ 见上：未被读取）
 #
 # 比赛场地 3000×3000mm。决赛现场可能调整区域位置。
 # ============================================================

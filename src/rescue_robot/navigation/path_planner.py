@@ -13,7 +13,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Tuple, Callable
+from typing import Dict, List, Optional, Set, Tuple, Callable
 
 logger = logging.getLogger("path_planner")
 
@@ -64,18 +64,32 @@ class CostMap:
             for _ in range(GRID_SIZE)
         ]
         self._dynamic_obstacles: List[Tuple[float, float, float]] = []  # (x, y, radius_mm)
+        # T2-4：动态层必须**单独记原值**。旧实现 `_clear_circle()` 无条件把格子写回
+        # `COST_FREE`，而静态禁区只在 `__init__` 写一次 → 对方机器人经过的禁区格子会被
+        # **永久抹成可通行** → A* 会从真正的对方安全区中间穿过去（赛项：进入对方安全区
+        # = 比赛结束）。现在按"原值快照"恢复。
+        self._dynamic_saved: Dict[Tuple[int, int], int] = {}
 
     def clear_dynamic(self) -> None:
-        """清除动态障碍（对方机器人等）"""
-        for x, y, r in self._dynamic_obstacles:
-            self._clear_circle(x, y, r)
+        """清除动态障碍（对方机器人等）——只恢复**动态层自己的**改动。"""
+        for (gx, gy), old in self._dynamic_saved.items():
+            self._grid[gy][gx] = old
+        self._dynamic_saved.clear()
         self._dynamic_obstacles.clear()
 
     def add_obstacle_circle(self, cx_mm: float, cy_mm: float,
                             radius_mm: float, cost: int = COST_OBSTACLE) -> None:
-        """添加圆形障碍物"""
+        """添加圆形障碍物（记录原值，供 clear_dynamic 精确恢复）"""
         self._dynamic_obstacles.append((cx_mm, cy_mm, radius_mm))
-        self._fill_circle(cx_mm, cy_mm, radius_mm, cost)
+        cx_g, cy_g = self._to_grid(cx_mm, cy_mm)
+        r_g = max(1, int(radius_mm / CELL_SIZE_MM))
+        for gy in range(max(0, cy_g - r_g), min(GRID_SIZE, cy_g + r_g + 1)):
+            for gx in range(max(0, cx_g - r_g), min(GRID_SIZE, cx_g + r_g + 1)):
+                dist = math.sqrt((gx - cx_g) ** 2 + (gy - cy_g) ** 2)
+                if dist > r_g:
+                    continue
+                self._dynamic_saved.setdefault((gx, gy), self._grid[gy][gx])
+                self._grid[gy][gx] = max(self._grid[gy][gx], cost)
 
     def add_forbidden_rect(self, x_mm: float, y_mm: float,
                            w_mm: float, h_mm: float) -> None:
@@ -282,12 +296,21 @@ class LocalPlanner:
     - 速度（越快越好）
     """
 
+    #: 默认限速（T2-3）：与 `MotionController.DEFAULT_MAX_*` 同源，
+    #: 由 `config.apply_robot_config()` 一起注入。旧实现把 850/3.0 写死在
+    #: `__init__` 默认参数里 → 现场把 YAML 的 `max_speed_mm_s` 调低时，
+    #: **恰恰在"贴近障碍"的场合**（局部避障输出）仍按 850mm/s 下发。
+    DEFAULT_MAX_LINEAR_SPEED = 850.0     # mm/s
+    DEFAULT_MAX_ANGULAR_SPEED = 3.0      # rad/s
+
     def __init__(self,
-                 max_linear_speed: float = 850.0,   # mm/s
-                 max_angular_speed: float = 3.0,     # rad/s
+                 max_linear_speed: Optional[float] = None,   # mm/s
+                 max_angular_speed: Optional[float] = None,  # rad/s
                  num_samples: int = 50):
-        self._max_v = max_linear_speed
-        self._max_w = max_angular_speed
+        self._max_v = (self.DEFAULT_MAX_LINEAR_SPEED
+                       if max_linear_speed is None else max_linear_speed)
+        self._max_w = (self.DEFAULT_MAX_ANGULAR_SPEED
+                       if max_angular_speed is None else max_angular_speed)
         self._num_samples = num_samples
 
         # 采样空间

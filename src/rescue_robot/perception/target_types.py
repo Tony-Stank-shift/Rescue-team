@@ -10,9 +10,12 @@ target_types.py —— 救援目标类型定义
 """
 
 import math
+import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -249,10 +252,127 @@ FINAL_TARGETS: Dict[Tuple[TargetColor, TargetShape], TargetInfo] = {
 # ============================================================
 
 def get_target_config(phase: CompetitionPhase) -> Dict[Tuple[TargetColor, TargetShape], TargetInfo]:
-    """获取当前比赛阶段的目标配置"""
-    if phase == CompetitionPhase.PRELIMINARY:
-        return PRELIMINARY_TARGETS
-    return FINAL_TARGETS
+    """获取当前比赛阶段的目标配置（已应用现场"类型→颜色"覆盖）。
+
+    ⚠️ 必须走 `_apply_color_override`：决赛现场会改颜色，而 (颜色,形状)→类型 是本表
+    唯一的判定依据。旧实现直接把写死的表返回 → **YAML 里改了 `target_color_map`
+    也不生效、且完全不报错**（现场以为改好了，实际仍按旧颜色判 → 目标判不出来
+    → 整场 0 分）。这就是 U5/B13 的核心。
+    """
+    base = (PRELIMINARY_TARGETS if phase == CompetitionPhase.PRELIMINARY
+            else FINAL_TARGETS)
+    return _apply_color_override(base)
+
+
+# ============================================================
+# 现场"类型 → 颜色"覆盖（决赛颜色现场可改，无需改代码）
+# ============================================================
+#: {TargetType: TargetColor}；空 = 使用代码内置颜色
+_COLOR_OVERRIDE: Dict[TargetType, TargetColor] = {}
+#: 覆盖结果缓存（按 base 表 id 缓存；set_color_override 时清空）
+_OVERRIDE_CACHE: Dict[int, Dict[Tuple[TargetColor, TargetShape], TargetInfo]] = {}
+
+#: 现场配置里允许出现的类型名 → TargetType
+_COLOR_NAME_TO_TYPE = {"regular": "REGULAR_SUPPLY", "core": "CORE_SUPPLY",
+                       "injured": "INJURED", "dangerous": "DANGEROUS"}
+
+
+def set_color_override(mapping: Optional[Dict[str, str]]) -> List[str]:
+    """按现场配置（`perception.target_color_map`）设置"类型 → 颜色"覆盖。
+
+    Args:
+        mapping: 形如 ``{"regular": "green", "core": "black",
+                         "injured": "orange", "dangerous": "light_blue"}``
+    Returns:
+        **现场配置问题**列表，调用方必须据此**拒绝启动**（忽略它就等于
+        "以为改好了其实没改"）。两类问题都会返回：
+
+        ① 无法识别的条目，如 ``["core=purple(不是合法颜色名…)"]``；
+        ② **合法但冲突**的覆盖（T2-18）：两类目标被映射到同一个
+           `(颜色, 形状)` 判定键，如 ``{"regular": "light_blue"}`` 会让
+           "普通物资"和"危险目标"都变成 `LIGHT_BLUE/CUBE` —— 冲突时
+           `_apply_color_override` 只能留下其中一个，**另一类目标整场检不到**，
+           而旧实现只在 logger.error 里说一句就继续跑（启动不报错）。
+    """
+    global _COLOR_OVERRIDE, _OVERRIDE_CACHE
+    problems: List[str] = []
+    new: Dict[TargetType, TargetColor] = {}
+    if mapping:
+        for key, value in mapping.items():
+            attr = _COLOR_NAME_TO_TYPE.get(str(key).strip().lower())
+            if attr is None:
+                problems.append(f"{key}(未知类型名，应为 "
+                                f"{'/'.join(sorted(_COLOR_NAME_TO_TYPE))})")
+                continue
+            try:
+                new[TargetType[attr]] = TargetColor(str(value).strip().lower())
+            except (KeyError, ValueError):
+                problems.append(f"{key}={value}(不是合法颜色名，合法值："
+                                f"{'/'.join(c.name.lower() for c in TargetColor)})")
+    _COLOR_OVERRIDE = new
+    _OVERRIDE_CACHE = {}          # 覆盖变了 → 缓存失效
+    logger.info("目标颜色覆盖已应用: %s",
+                {t.name: c.name for t, c in new.items()} or "无（使用内置颜色）")
+
+    # ── T2-18：把"合法但冲突"的覆盖也**并入返回值**（调用方据此拒绝启动）──
+    #    冲突与 base 表有关（初赛/决赛表不同），所以两张表都要算。
+    #    这里顺便把结果写进缓存，行为与 `_apply_color_override` 的懒计算一致。
+    if new:
+        for base, phase_label in ((PRELIMINARY_TARGETS, "初赛目标表"),
+                                  (FINAL_TARGETS, "决赛目标表")):
+            out, collisions = _build_override_table(base)
+            _OVERRIDE_CACHE[id(base)] = out
+            for color_name, shape_name, type_a, type_b in collisions:
+                problems.append(
+                    f"{phase_label}颜色冲突: {color_name}/{shape_name} 同时对应 "
+                    f"{type_a} 与 {type_b} → 其中一类目标**整场都判不出来**"
+                    f"（请让每类目标的 (颜色,形状) 组合唯一）")
+    return problems
+
+
+def get_color_override() -> Dict[TargetType, TargetColor]:
+    """当前生效的颜色覆盖（只读，供自检/日志核对）。"""
+    return dict(_COLOR_OVERRIDE)
+
+
+def _build_override_table(base) -> Tuple[dict, List[tuple]]:
+    """按当前 `_COLOR_OVERRIDE` 重映射 base 表，并返回 (新表, 冲突列表)。
+
+    冲突 = 两类目标落到同一个 `(颜色, 形状)` 键（其中一类永远判不出来）。
+    冲突同时：① logger.error 喊出来；② 由 `set_color_override` 并入返回值。
+    """
+    out: Dict[Tuple[TargetColor, TargetShape], TargetInfo] = {}
+    collisions: List[tuple] = []
+    for (color, shape), info in base.items():
+        new_color = _COLOR_OVERRIDE.get(info.type, color)
+        key = (new_color, shape)
+        if key in out and out[key].type != info.type:
+            collisions.append((new_color.name, shape.name,
+                               out[key].type.name, info.type.name))
+        out[key] = info
+    if collisions:
+        # 覆盖后两类目标撞到同一个 (颜色,形状) 键 → 其中一类永远判不出来。
+        # 这是**现场配置错误**，必须显式喊出来，不能静默取其一。
+        logger.error("颜色覆盖导致判定键冲突（会有一类目标无法识别）：%s",
+                     "；".join(f"{c}/{s} 同时对应 {a} 与 {b}"
+                               for c, s, a, b in collisions))
+    return out, collisions
+
+
+def _apply_color_override(base):
+    """把 base 表按"类型→颜色"重映射。
+
+    **无覆盖时原样返回 base** —— 恒等变换，保证现有行为零变化。
+    """
+    if not _COLOR_OVERRIDE:
+        return base
+    cached = _OVERRIDE_CACHE.get(id(base))
+    if cached is not None:
+        return cached
+
+    out, _collisions = _build_override_table(base)
+    _OVERRIDE_CACHE[id(base)] = out
+    return out
 
 
 def get_point_value(target_type: TargetType) -> int:

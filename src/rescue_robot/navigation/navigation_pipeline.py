@@ -22,7 +22,7 @@ from .path_planner import (
 )
 from .motion_control import MotionController, VelocityCommand
 from .forbidden_zones import ForbiddenZoneManager, ForbiddenZone
-from ..perception.field_elements import FieldLayout, SafeZoneColor
+from ..perception.field_elements import FIELD_SIZE, FieldLayout, SafeZoneColor
 
 logger = logging.getLogger("navigation_pipeline")
 
@@ -84,6 +84,15 @@ class NavigationPipeline:
         self._target: Optional[Point] = None
         self._current_path: List[Point] = []
         self._plan_result: Optional[PlanResult] = None
+        self._rejected_targets = 0   # 越界/非法目标被拒绝的次数（诊断用）
+        self._bump_done = False      # 本次减速带越障是否已完成（防止同一次越障里反复重入）
+        # T1-4：可选的"到位朝向"要求。投放落点 = 车心 + L·朝向，朝向错则落点错
+        # （投歪 -10 分/个）。置位后：位置到位但朝向不对 → 原地对准，不算到达。
+        self._final_heading: Optional[float] = None
+        # T2-2：BLOCKED 退避重规划的时间戳（避免每帧全空间 A* + 刷屏）
+        self._blocked_last_plan_ts = 0.0
+        self._blocked_warn_ts = 0.0
+        self._caution_warn_ts = 0.0     # T1-15 预警日志限频
         self._replan_counter = 0
         self._replan_interval = 30  # 每 30 帧（0.6s）重规划一次
         self._close_range_mm = 150.0  # 接近段：距目标小于此值时直接精确接近
@@ -122,19 +131,176 @@ class NavigationPipeline:
 
     # ---- 目标设置 ----
 
-    def set_target(self, x: float, y: float) -> None:
+    def set_target(self, x: float, y: float) -> bool:
         """设置导航目标。
 
-        目标点若落在 hard 禁区（对方安全区 / 场地外）内部，先钳制到最近的合法位置
-        再下发 —— 否则车会径直开进对方安全区（赛项：进入对方安全区 → 比赛结束）。
+        两道闸门（顺序不能换）：
+          ① **越界拒绝**：目标点在场地之外（<0 或 >3000）→ 直接拒绝，不设置、打 WARNING。
+             为什么不能"夹紧"：`CostMap._to_grid` 会把越界坐标 clamp 进网格 → A* 返回
+             success=True → 上层以为规划成功、导航判"到达"，而 `is_in_field()` 为 False
+             （test-author 评审发现的 S-NEW）。静默夹紧会把"给了个场外目标"变成
+             "看起来正常但永远走不到"的幽灵任务。
+          ② 禁区钳制：落在 hard 禁区（对方安全区 / 边界安全带）内的目标点，钳制到最近合法点
+             —— 否则车会径直开进对方安全区（赛项：进入对方安全区 → 比赛结束）。
+
+        Returns:
+            True=已设置（可能被钳制）；False=被拒绝（越界），原目标保持不变
         """
-        safe_x, safe_y = self._forbidden.clamp_to_safe(x, y)
+        if not self._forbidden.is_in_field(x, y):
+            self._rejected_targets += 1
+            logger.warning(
+                f"⚠️ 导航目标越界 ({x:.0f}, {y:.0f}) 在场地外 → 拒绝设置"
+                f"（保持原目标 {self._target}）；累计拒绝 {self._rejected_targets} 次"
+            )
+            return False
+
+        clamped = self._forbidden.clamp_to_safe(x, y)
+        if clamped is None:
+            # T1-2：钳制找不到合法替代点时**明确拒绝**（旧实现静默返回场地中心）
+            self._rejected_targets += 1
+            logger.warning(f"⚠️ 导航目标 ({x:.0f},{y:.0f}) 在禁区内且无合法替代点 "
+                           f"→ 拒绝设置；累计拒绝 {self._rejected_targets} 次")
+            return False
+        safe_x, safe_y = clamped
         if (safe_x, safe_y) != (x, y):
             logger.warning(f"⚠️ 导航目标 ({x:.0f}, {y:.0f}) 落在禁区内 → "
                            f"钳制到 ({safe_x:.0f}, {safe_y:.0f})")
+
+        # ── ③ 可达性闸门（T1-1）──
+        # ⚠️ 只判"在场地内"是不够的：最外圈 50mm 是"边界安全带"（costmap 写满 255），
+        # 于是 `set_target(2999,1500)` 会返回 True，而 A* **永远规划失败** →
+        # 导航每帧重规划、每帧零速度、`is_arrived()` 永远 False（实测 60 帧
+        # state=BLOCKED cmd=(0,0)）→ 正是本文件 docstring 说要消灭的"幽灵任务"。
+        # 这里再加一道"必须落在可通行格"的校验，并把点朝场地内侧拉回来。
+        if not self._cost_map.is_free(safe_x, safe_y):
+            pulled = self._pull_to_traversable(safe_x, safe_y)
+            if pulled is None:
+                self._rejected_targets += 1
+                logger.warning(
+                    f"⚠️ 导航目标 ({safe_x:.0f},{safe_y:.0f}) 不可通行（A* 永远到不了）"
+                    f"且无法拉回 → 拒绝设置；累计拒绝 {self._rejected_targets} 次")
+                return False
+            logger.warning(f"⚠️ 导航目标 ({safe_x:.0f},{safe_y:.0f}) 落在不可通行区"
+                           f"（边界安全带）→ 拉回 ({pulled[0]:.0f},{pulled[1]:.0f})")
+            safe_x, safe_y = pulled
+
         self._target = (safe_x, safe_y)
         self._state = NavState.PLANNING
         logger.info(f"新导航目标: ({safe_x:.0f}, {safe_y:.0f})")
+        return True
+
+    #: 把不可通行的目标点朝场地中心拉回时，每次的步长与最大尝试距离（mm）
+    #: 硬禁区预警带距离（mm）：进入后主动减速（T1-15）。
+    CAUTION_DIST_MM = 150.0
+    #: 预警带内的速度比例。
+    CAUTION_SPEED_RATIO = 0.5
+    #: BLOCKED 状态下的最小重规划间隔（秒）。T2-2：旧实现每帧重规划（最坏 15.3ms/帧）。
+    BLOCKED_REPLAN_S = 0.5
+    PULL_STEP_MM = 25.0
+    PULL_MAX_MM = 300.0
+
+    #: 把不可通行的目标点拉回时可选的 8 个方向（先近后远、先正向后对角）
+    _PULL_DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1),
+                  (0.7071, 0.7071), (0.7071, -0.7071),
+                  (-0.7071, 0.7071), (-0.7071, -0.7071))
+
+    def _pull_to_traversable(self, x: float, y: float):
+        """把不可通行的点拉到**最近的可通行格**（T1-1）。
+
+        ⚠️ 不能只朝"场地中心"方向拉：若该点紧贴一块大禁区（例如贴着对方安全区
+        外侧的边界带），朝中心走会**穿过更大的禁区** → 永远拉不到 → 只能拒绝，
+        而拒绝会让上层拿着上一次的陈旧目标继续跑。改为在 8 个方向上做
+        "由近及远"的最近可通行点搜索。
+
+        Returns:
+            (x, y) 可通行的点；找不到则 None（调用方**明确拒绝**该目标）。
+        """
+        steps = max(1, int(self.PULL_MAX_MM / self.PULL_STEP_MM))
+        best = None
+        best_d = None
+        for i in range(1, steps + 1):
+            r = self.PULL_STEP_MM * i
+            for ux, uy in self._PULL_DIRS:
+                px, py = x + ux * r, y + uy * r
+                if not self._forbidden.is_in_field(px, py):
+                    continue
+                if self._forbidden.check_violation(px, py) is not None:
+                    continue
+                if self._cost_map.is_free(px, py):
+                    d = (px - x) ** 2 + (py - y) ** 2
+                    if best_d is None or d < best_d:
+                        best_d, best = d, (px, py)
+            if best is not None:
+                return best          # 由近及远：当前半径上已找到最近解
+        return None
+
+    def _apply_caution(self, cmd, current_pose):
+        """硬禁区**预警带**内主动减速（T1-15）。
+
+        用现成的 `ForbiddenZoneManager.get_violation_warning()`（距硬禁区 150mm 内），
+        把速度压到 `CAUTION_SPEED_RATIO`。旧实现该接口零调用 → 只有"已经踩进去"的
+        事后倒车，罚分已经发生。
+        """
+        try:
+            zone = self._forbidden.get_violation_warning(
+                current_pose[0], current_pose[1], self.CAUTION_DIST_MM)
+        except Exception:
+            zone = None
+        if zone is None:
+            return cmd
+        now = time.time()
+        if now - self._caution_warn_ts >= 1.0:
+            self._caution_warn_ts = now
+            logger.warning(f"⚠️ 接近硬禁区 {zone.name}（<{self.CAUTION_DIST_MM:.0f}mm）"
+                           f"→ 主动减速到 {self.CAUTION_SPEED_RATIO*100:.0f}%")
+        return VelocityCommand(linear=cmd.linear * self.CAUTION_SPEED_RATIO,
+                               angular=cmd.angular,
+                               timestamp=now)
+
+    def _bump_heading_correction(self, current_pose, dt: float = 0.02) -> float:
+        """越障期间的朝向修正（rad/s）——朝当前导航目标纠偏，限幅在 motion 侧。
+
+        旧实现越障时 `angular=0`，全程不看目标：车头朝哪就朝哪冲 600mm，
+        可能撞围栏/骑上减速带/直入对方安全区。这里给一个小幅纠偏即可，
+        真正急转留给越障结束后的正常导航。
+        """
+        if self._target is None:
+            return 0.0
+        x, y, theta = current_pose[0], current_pose[1], current_pose[2]
+        dx, dy = self._target[0] - x, self._target[1] - y
+        if (dx * dx + dy * dy) ** 0.5 < 1.0:
+            return 0.0
+        err = math.atan2(dy, dx) - theta
+        # 归一到 [-pi, pi]
+        while err > math.pi:
+            err -= 2 * math.pi
+        while err < -math.pi:
+            err += 2 * math.pi
+        return 0.6 * err          # 比例系数取小值：只做温和纠偏
+
+    def require_final_heading(self, theta_rad: float) -> None:
+        """要求"到位时朝向也对准 theta_rad"（T1-4）。
+
+        为什么需要：`is_at_target()` 只看位置，而 `compute_velocity()` 在
+        `distance < POSITION_TOLERANCE_MM` 时**无条件返回零速** → "到达"可以在朝向
+        完全不对时成立。投放落点 = 车心 + L·朝向（`transport.drop_position`），
+        朝向错 → 落点错 → 投歪（-10 分/个）。转运管线在接近投放点时置位本要求。
+        """
+        self._final_heading = float(theta_rad)
+
+    def clear_final_heading(self) -> None:
+        self._final_heading = None
+
+    def _aligned(self, current_pose) -> bool:
+        """朝向是否已满足要求（未要求时恒 True）。"""
+        if self._final_heading is None:
+            return True
+        err = self._final_heading - current_pose[2]
+        while err > math.pi:
+            err -= 2 * math.pi
+        while err < -math.pi:
+            err += 2 * math.pi
+        return abs(err) <= self._motion.ANGLE_TOLERANCE_RAD
 
     def clear_target(self) -> None:
         self._target = None
@@ -183,16 +349,30 @@ class NavigationPipeline:
         if self._target is None:
             return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())
 
-        # 越障处理
-        if near_speed_bump and not self._motion.is_bump_mode:
+        # ── 越障处理（T0-4 已修）──
+        # 旧实现三个问题：
+        #   ① 退出判据是**墙钟** `int((now-_bump_timer)/1.0) >= 3`：主循环被套取/投放
+        #      阻塞（单次 0.9s，重试可达 6s）时墙钟照走 → 还没跨过减速带就退出；
+        #   ② `enter_bump_mode()` 把计时清零，而只要 `near_speed_bump` 仍为 True 就会
+        #      下一帧**立刻重入** → 反复直线冲（每轮 200mm/s × 3s = 600mm），
+        #      实测 10 秒内从 (300,300) 直冲到 (300,2300)，完全无视目标 (1500,1500)；
+        #   ③ 越障期间 `angular=0` → 全程不看目标方向，车头朝哪就朝哪冲。
+        # 现在：按**里程**（`motion.bump_finished`，含最长时长兜底）判退出；
+        #       加"本次已完成"闩锁（离开减速带区才解除），不再同一次越障里重入；
+        #       越障期间保留**限幅**的朝向修正，朝当前目标纠偏。
+        if not near_speed_bump:
+            self._bump_done = False         # 离开减速带区 → 解除闩锁，允许下次再进
+        elif not self._motion.is_bump_mode and not self._bump_done:
             self._motion.enter_bump_mode()
             self._state = NavState.BUMP_CROSSING
 
         if self._motion.is_bump_mode:
-            cmd = self._motion.compute_bump_velocity(dt)
+            cmd = self._motion.compute_bump_velocity(
+                dt, angular=self._bump_heading_correction(current_pose, dt))
             self._localizer.update(cmd.linear, cmd.angular, dt)
-            if self._motion._bump_count >= 3:
+            if self._motion.bump_finished:
                 self._motion.exit_bump_mode()
+                self._bump_done = True      # 闩锁：同一次越障不重入
                 self._state = NavState.MOVING
             return cmd
 
@@ -211,14 +391,28 @@ class NavigationPipeline:
             current_pose[1] - self._target[1],
         )
         if dist_to_target < self._close_range_mm:
-            if self._motion.is_at_target(self._target, current_pose):
+            if (self._motion.is_at_target(self._target, current_pose)
+                    and self._aligned(current_pose)):
                 self._state = NavState.ARRIVED
                 return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())
-            cmd = self._motion.compute_velocity(self._target, current_pose, dt=dt)
+            cmd = self._motion.compute_velocity(self._target, current_pose, dt=dt,
+                                                align_heading=self._final_heading)
             self._total_distance += abs(cmd.linear) * dt
             self._localizer.update(cmd.linear, cmd.angular, dt)
             self._state = NavState.MOVING
             return cmd
+
+        # ── T2-2：BLOCKED 退避 ──
+        # 旧实现：`need_replan` 含 `state == BLOCKED`，而规划失败后又把状态设回 BLOCKED
+        # → **每帧都跑一次全空间 A***（实测最坏 15.3ms，占 50Hz 单帧预算 20ms 的 76%），
+        # 并以 50Hz 刷 "路径规划失败" 日志。RBK/ARM 上叠加感知后很可能断流
+        # （VEL 断供 → 下位机 300ms 保持/800ms 停速看门狗接管，车会停）。
+        # 现在：BLOCKED 时按 BLOCKED_REPLAN_S 退避重规划，其间返回零速且不打日志。
+        if self._state == NavState.BLOCKED:
+            now_blocked = time.time()
+            if now_blocked - self._blocked_last_plan_ts < self.BLOCKED_REPLAN_S:
+                return VelocityCommand(linear=0.0, angular=0.0, timestamp=now_blocked)
+            self._blocked_last_plan_ts = now_blocked
 
         # 重规划
         need_replan = (
@@ -239,7 +433,10 @@ class NavigationPipeline:
                 self._state = NavState.MOVING
             else:
                 self._state = NavState.BLOCKED
-                logger.warning("路径规划失败 — 无可行路径")
+                now_w = time.time()
+                if now_w - self._blocked_warn_ts >= 1.0:
+                    self._blocked_warn_ts = now_w
+                    logger.warning("路径规划失败 — 无可行路径（已进入退避重规划）")
                 return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())
 
         self._replan_counter += 1
@@ -249,13 +446,15 @@ class NavigationPipeline:
             self._prune_path(current_pose)
 
             if not self._current_path:
-                if self._motion.is_at_target(self._target, current_pose):
+                if (self._motion.is_at_target(self._target, current_pose)
+                        and self._aligned(current_pose)):
                     self._state = NavState.ARRIVED
                     logger.debug("到达目标!")
                     return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())
                 # 路径已被 prune 空但尚未到达目标（最后一段精确接近）：
                 # 直接朝目标点做位置控制，避免 track_path(空路径) 返回零速度而卡死。
-                cmd = self._motion.compute_velocity(self._target, current_pose, dt=dt)
+                cmd = self._motion.compute_velocity(self._target, current_pose, dt=dt,
+                                                    align_heading=self._final_heading)
                 self._total_distance += abs(cmd.linear) * dt
                 self._localizer.update(cmd.linear, cmd.angular, dt)
                 return cmd
@@ -276,6 +475,12 @@ class NavigationPipeline:
                 self._state = NavState.AVOIDING
             else:
                 self._state = NavState.MOVING
+
+            # T1-15：硬禁区**预警带减速**。旧实现只有"已经进入禁区"的事后反应
+            # （此时 -5 分/次的判罚已成立、进对方安全区更是比赛结束），而现成的
+            # `get_violation_warning()`（150mm 预警）**零生产调用**。
+            # 这里在预警带内主动把速度压到一半，给倒车规避留出反应距离。
+            cmd = self._apply_caution(cmd, current_pose)
 
             self._total_distance += abs(cmd.linear) * dt
             self._localizer.update(cmd.linear, cmd.angular, dt)
@@ -344,7 +549,11 @@ class NavigationPipeline:
             for dy in range(-2, 3):
                 nx, ny = gx + dx, gy + dy
                 if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE:
-                    if self._cost_map._grid[ny][nx] >= COST_OBSTACLE:
+                    # T2-1：对手的代价档是 COST_OPPONENT(200) < COST_OBSTACLE(255)，
+                    # 旧实现只比 COST_OBSTACLE → 对手**永远无法触发**局部避障
+                    # （实测对手就在正前方 200mm 处 60 帧，`_is_near_obstacle` 恒 False）。
+                    # 现在把"对手档"也视为需要避障的障碍。
+                    if self._cost_map._grid[ny][nx] >= COST_OPPONENT:
                         return True
         return False
 
