@@ -167,6 +167,12 @@ class CVDetector(AbstractDetector):
                            "或在树莓派上安装: pip install opencv-python")
             return []
 
+        if frame is None:
+            # 无帧（摄像头未就绪/掉线）：视为"本帧无目标"，不是错误。
+            # 旧实现在这里对 None 调 cv2.cvtColor 会抛异常，被主循环捕获后
+            # 整轮 _run_once 被跳过 → 决策/导航/转运全不执行（表现为"原地去世"）。
+            return []
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         detections = []
 

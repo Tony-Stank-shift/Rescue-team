@@ -37,6 +37,7 @@ class TransportPhase(Enum):
     IDLE = auto()               # 空闲
     APPROACHING = auto()        # 接近目标中
     CAPTURING = auto()          # 套取中
+    RETREAT = auto()            # 套取失败 → 抬爪后退，准备重试（不放弃整趟）
     TRANSPORTING = auto()       # 运送至安全区
     PLACING = auto()            # 投放中
     COMPLETE = auto()           # 完成
@@ -104,6 +105,9 @@ class TransportPipeline:
         self._place_started = False     # 是否已开始推式放置
         self._push_dist_mm = 100.0      # 推入斜坡距离（真机标定）
 
+        # 套取失败重试（抬爪 + 后退 + 重新接近），超过次数才放弃本趟
+        self._capture_retries = 0
+
         logger.info("TransportPipeline 初始化")
 
     # ---- 属性 ----
@@ -159,8 +163,39 @@ class TransportPipeline:
             'side_offset': side_offset,
         }
 
+    #: 套取失败后允许的重试次数（每次：抬爪 → 后退 → 重新接近 → 再套）
+    MAX_CAPTURE_RETRIES = 3
+    #: 套取失败的后退距离（mm）：退开一点再重新对位，避免在同一个位置反复失败
+    RETREAT_MM = 120.0
+
     def is_idle(self) -> bool:
         return self._phase in (TransportPhase.IDLE, TransportPhase.COMPLETE)
+
+    def _begin_retreat(self, rx: float, ry: float, rtheta: float, nav) -> None:
+        """套取失败后：抬起夹爪 → 朝目标反方向后退 RETREAT_MM → 准备重试。
+
+        不放弃整趟转运（旧实现直接 IDLE + 清空目标，等于整趟白跑）。
+        """
+        self._sleeve.raise_up()
+        if not self._current_targets or nav is None:
+            # 无法规划后退（无导航/无目标）→ 原地重新接近重试
+            self._phase = TransportPhase.APPROACHING
+            return
+        tx, ty = self._current_targets[0].position[0], self._current_targets[0].position[1]
+        dx, dy = rx - tx, ry - ty
+        norm = (dx * dx + dy * dy) ** 0.5
+        if norm < 1e-3:
+            dx, dy, norm = -1.0, 0.0, 1.0
+        bx = rx + dx / norm * self.RETREAT_MM
+        by = ry + dy / norm * self.RETREAT_MM
+        try:
+            nav.set_target(bx, by)
+        except Exception as e:
+            logger.warning(f"后退目标设置失败({e})，原地重试")
+            self._phase = TransportPhase.APPROACHING
+            return
+        self._phase = TransportPhase.RETREAT
+        logger.info(f"套取失败 → 抬爪后退 {self.RETREAT_MM:.0f}mm 到 ({bx:.0f},{by:.0f}) 准备重试")
 
     # ---- 转运控制 ----
 
@@ -235,12 +270,29 @@ class TransportPipeline:
                             self._phase = TransportPhase.VIOLATION
                             return self._get_status()
                     self._phase = TransportPhase.TRANSPORTING
+                    self._capture_retries = 0
                     logger.info("套取完成，开始运送")
                 else:
-                    logger.error("套取失败: 放弃本趟转运")
-                    self._phase = TransportPhase.IDLE
-                    self._current_targets.clear()
+                    # 套取失败：不立刻放弃整趟 —— 抬爪 + 后退一小段 + 重新接近重试
+                    self._capture_retries += 1
+                    if self._capture_retries <= self.MAX_CAPTURE_RETRIES:
+                        logger.warning(
+                            f"套取失败({self._capture_retries}/{self.MAX_CAPTURE_RETRIES})："
+                            "抬起夹爪 → 后退 → 重新接近重试")
+                        self._begin_retreat(rx, ry, rtheta, nav)
+                    else:
+                        logger.error(
+                            f"套取连续 {self.MAX_CAPTURE_RETRIES} 次失败：放弃本趟转运")
+                        self._capture_retries = 0
+                        self._phase = TransportPhase.IDLE
+                        self._current_targets.clear()
             # 已套住时继续
+
+        elif self._phase == TransportPhase.RETREAT:
+            # 已抬爪后退 → 到位后重新接近同一目标，再试一次套取
+            if (nav is None) or nav.is_arrived():
+                logger.info("后退到位，重新接近目标（重试套取）")
+                self._phase = TransportPhase.APPROACHING
 
         elif self._phase == TransportPhase.TRANSPORTING:
             # 运送至投放点（nav 目标已由 DecisionEngine 的 TRANSPORT_TO 设为

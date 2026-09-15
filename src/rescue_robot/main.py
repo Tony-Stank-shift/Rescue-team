@@ -141,16 +141,26 @@ def main():
                 logger.error(f"串口打开失败: {chassis._port}（请检查接线 / dialout 权限）")
             logger.info(f"已创建串口底盘驱动: {chassis._port} @ {chassis._baudrate} "
                         f"(is_open={chassis.is_open})")
-            # 创建摄像头（真机视觉；CAM_INDEX 可配，默认 1=外接 USB）
+            # 创建摄像头：用后台采集线程（CameraReader），避免主循环被 read() 阻塞。
+            # 旧实现直接在 50Hz 主循环里 cv2.VideoCapture.read()，摄像头未就绪/掉线时会卡死主循环。
             try:
-                import cv2
-                cam_idx = int(os.environ.get("CAM_INDEX", "1"))
-                camera = cv2.VideoCapture(cam_idx)
-                if not camera.isOpened():
+                from .hardware.camera_reader import CameraReader
+                cam_idx = int(os.environ.get("CAM_INDEX", "0"))
+                cam = CameraReader(cam_idx)
+                if cam.start():
+                    # 预热：等首帧（超时则视为不可用 → 降级 Mock）
+                    warmup = float(os.environ.get("CAM_WARMUP_S", "3.0"))
+                    if cam.wait_first_frame(timeout=warmup):
+                        logger.info(f"摄像头 {cam_idx} 就绪（首帧已到）")
+                        camera = cam
+                    else:
+                        logger.warning(
+                            f"摄像头 {cam_idx} {warmup:.0f}s 内未出帧，感知降级为 Mock")
+                        cam.stop()
+                        camera = None
+                else:
                     logger.warning(f"摄像头 {cam_idx} 打开失败，感知将退化为 Mock")
                     camera = None
-                else:
-                    logger.info(f"摄像头 {cam_idx} 打开成功")
             except Exception as e:
                 logger.warning(f"创建摄像头失败: {e}")
                 camera = None

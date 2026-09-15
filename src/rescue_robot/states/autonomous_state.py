@@ -229,9 +229,15 @@ class AutonomousState:
         frame = None
         if self._camera is not None:
             try:
-                ok, frame = self._camera.read()
-                if not ok:
-                    frame = None
+                if hasattr(self._camera, "get_frame"):
+                    # CameraReader：非阻塞取最新帧（拿不到就是 None，绝不等待，
+                    # 避免摄像头未就绪/掉线时把 50Hz 主循环卡死）
+                    frame = self._camera.get_frame()
+                else:
+                    # 兼容裸 cv2.VideoCapture
+                    ok, frame = self._camera.read()
+                    if not ok:
+                        frame = None
             except Exception as e:
                 logger.warning(f"读取摄像头失败: {e}")
                 frame = None
