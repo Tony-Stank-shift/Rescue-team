@@ -63,27 +63,57 @@ n = mk()
 n.set_target(1345.0, 2820.0)
 chk("合法目标(红物资区中心)保持不变", n.target == (1345.0, 2820.0), str(n.target))
 
-# 6) 场外目标也钳制
+# 6) 场外目标：S-NEW 之后改为**显式拒绝**（不再静默夹紧）
 n = mk()
-n.set_target(-500.0, 1500.0)
-chk("场外目标钳制", n.forbidden.check_violation(*n.target) is None, str(n.target))
+rejected = n.set_target(-500.0, 1500.0)
+chk("场外目标被拒绝（不设置目标）", rejected is False and n.target is None,
+    f"return={rejected}, target={n.target}")
 
 # 7) 全场随机采样：合法点 100% 保持原值
 import random  # noqa: E402
 
 random.seed(1)
 n = mk()
-moved = 0
+moved = kept = pulled = 0
 for _ in range(2000):
     x, y = random.uniform(0, 3000), random.uniform(0, 3000)
+    n.set_target(x, y)
     if n.forbidden.check_violation(x, y) is None:
-        n.set_target(x, y)
-        assert n.target == (x, y), (x, y, n.target)
+        t = n.target
+        # T1-1 新增契约：不在禁区内 ≠ 一定可达。落在"边界安全带"（最外圈 50mm，
+        # costmap 写满 255）的点 A* 永远到不了 → 必须被拉回可通行格，否则会变成
+        # "接受了但永远走不到"的幽灵目标。所以这里改为断言：
+        #   · 目标必须是可通行格（要么原值，要么被拉回）
+        #   · 若被拉回，位移必须有界（不许像旧 clamp 那样甩到场地中心）
+        assert t is not None and n._cost_map.is_free(*t), (x, y, t)
+        d = math.hypot(t[0] - x, t[1] - y)
+        if d == 0:
+            kept += 1
+        else:
+            pulled += 1
+            assert d <= n.PULL_MAX_MM + 60.0, f"拉回位移过大: {(x, y)} → {t} = {d:.0f}mm"
     else:
-        n.set_target(x, y)
         moved += 1
-chk(f"2000 次采样：合法点全部保持原值（{moved} 个禁区点已钳制）", True)
+chk(f"2000 次采样：合法点 保持原值 {kept} 个 / 拉回可通行格 {pulled} 个"
+    f"（均有界）；禁区点钳制 {moved} 个", True)
 
 print(f"\nP1-5 结果: {sum(checks)}/{len(checks)} 通过")
+if not all(checks):
+    raise SystemExit(1)
+
+# 8) S-NEW：越界目标必须被显式拒绝（不再静默夹紧）
+n = mk()
+ok_set = n.set_target(9000.0, 9000.0)
+chk("越界目标(9000,9000) 被拒绝且未设置目标", ok_set is False and n.target is None,
+    f"return={ok_set}, target={n.target}")
+n.set_target(1500.0, 1500.0)
+ok_in = n.set_target(-50.0, 1500.0)
+chk("越界目标(-50,1500) 被拒绝且保留原目标", ok_in is False and n.target == (1500.0, 1500.0),
+    f"return={ok_in}, target={n.target}")
+chk("场外目标不再被判为'已到达'（is_in_field=False 时拒绝）",
+    n.forbidden.is_in_field(9000.0, 9000.0) is False and n._rejected_targets >= 2,
+    f"rejected={n._rejected_targets}")
+
+print(f"\n含 S-NEW 后: {sum(checks)}/{len(checks)} 通过")
 if not all(checks):
     raise SystemExit(1)

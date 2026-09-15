@@ -70,17 +70,52 @@ def run(ctx):
                    "注意本测试喂的是外部位姿，与真机一致")
 
     # ── 2) 异常目标：对方安全区内部 / 场外坐标，不应崩溃、不应冲进禁区 ──
+    #    ⚠️ 这条同时校验 `set_target` 的**新契约**（fixer 已改，见
+    #    docs/audit/S_NEW_NAV_TARGET_CONTRACT.md）：
+    #      · 场外坐标 → 必须**返回 False 且不设置目标**（旧实现静默夹到边界格 →
+    #        A* 报 success=True、上层以为"到了"，实际永远走不到）
+    #      · 禁区内坐标 → 返回 True 但**钳制到最近合法点**（否则车径直开进对方安全区）
     for label, (tx, ty) in (("对方安全区内部", (1500.0, 100.0)),
-                            ("场外坐标", (9000.0, 9000.0))):
+                            ("场外坐标", (9000.0, 9000.0)),
+                            ("场外负坐标", (-500.0, 1500.0))):
         nav2 = make_nav()
         try:
-            nav2.set_target(tx, ty)
+            accepted = nav2.set_target(tx, ty)
             (x2, y2, _t2), _s, _m, _a = _drive(nav2, (tx, ty), max_steps=400)
             inside = nav2.forbidden.check_violation(x2, y2) if hasattr(nav2, "forbidden") else None
-            ev.append(f"{label} ({tx:.0f},{ty:.0f})：400 步后停在 ({x2:.0f},{y2:.0f})，未崩溃 ✓"
+            ev.append(f"{label} ({tx:.0f},{ty:.0f})：set_target={accepted}、"
+                      f"target={nav2.target}、400 步后停在 ({x2:.0f},{y2:.0f})，未崩溃 ✓"
                       + (f"，终点仍在禁区内（{inside.name}）⚠️" if inside is not None else ""))
         except Exception as e:
             return bad(MODULE, f"目标为「{label}」时导航抛异常：{e!r}", ev,
                        "异常目标必须被安全处理（拒绝/停在禁区外），不能崩")
 
-    return ok(MODULE, "导航正常（可规划并到达目标；异常目标不崩）", ev)
+        in_field = nav2.forbidden.is_in_field(tx, ty)
+        if not in_field:
+            # 场外坐标：必须显式拒绝（新契约）
+            if accepted is not False:
+                return bad(MODULE,
+                           f"场外目标 ({tx:.0f},{ty:.0f}) 被 set_target 接受了（返回 {accepted}）"
+                           f"→ 旧契约的静默夹紧又回来了：A* 会把坐标夹进边界格并报「规划成功」，"
+                           f"上层以为到达、实际永远走不到",
+                           ev, "`NavigationPipeline.set_target` 必须用 "
+                               "`ForbiddenZoneManager.is_in_field()` 拒绝场外坐标并返回 False")
+            if nav2.target is not None:
+                return bad(MODULE,
+                           f"场外目标被拒绝后 target 仍被改动（target={nav2.target}）→ "
+                           f"拒绝必须「保持原目标不变」", ev,
+                           "拒绝分支要在任何赋值之前 return False")
+            ev.append(f"[S-NEW] ✓ 场外目标被显式拒绝且未改动原目标（{label}）")
+        else:
+            # 场内但落在硬禁区：必须钳制到合法点，不能原样接受
+            if accepted and nav2.target is not None and nav2.forbidden.check_violation(*nav2.target):
+                return bad(MODULE,
+                           f"禁区内的目标 ({tx:.0f},{ty:.0f}) 被原样接受（target={nav2.target}）"
+                           f"→ 车会径直开进禁区（对方安全区=比赛结束）", ev,
+                           "`set_target` 对硬禁区目标必须 `clamp_to_safe()` 钳制到最近合法点")
+            ev.append(f"[S-NEW] ✓ 禁区内目标被钳制到合法点（target={nav2.target}）")
+        if inside is not None:
+            return bad(MODULE, f"目标为「{label}」时车最终停在了禁区内（{inside.name}）", ev,
+                       "越界/禁区处理必须把车留在场地内的合法点")
+
+    return ok(MODULE, "导航正常（可规划并到达目标；异常目标显式拒绝/钳制、不崩、不冲进禁区）", ev)

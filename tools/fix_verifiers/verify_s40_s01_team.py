@@ -180,10 +180,228 @@ def test_s40_second_half_and_b8():
     from rescue_robot.states.autonomous_state import AutonomousState
     import inspect
     src = inspect.getsource(AutonomousState._run_once)
-    check("_run_once 里有终场分支（DONE → 停车）",
-          "StrategyState.DONE" in src and "_stop_chassis" in src and
-          "_stop_event.set()" in src)
-    check("终场同时清导航目标", "clear_target" in src)
+    # 终场收口已抽成 _finish_match()（这样"时间到"与"确认后的 DONE"共用同一条路径，
+    # 且只在首次执行——避免每帧重复停车/重复刷日志）
+    fin = inspect.getsource(AutonomousState._finish_match)
+    check("_run_once 里有终场分支（DONE → 收口）",
+          "StrategyState.DONE" in src and "_finish_match" in src)
+    check("终场收口 = 清导航目标 + 停车 + 退出主循环",
+          "clear_target" in fin and "_stop_chassis" in fin and "_stop_event.set()" in fin,
+          "缺失项：" + ", ".join(
+              k for k in ("clear_target", "_stop_chassis", "_stop_event.set()")
+              if k not in fin))
+
+
+def test_terminal_guard():
+    """N-1【blocker】：'当前帧看不到目标' **绝不许**被当成终场。
+
+    为什么单列：这条在集成仿真里**永远测不出来**（仿真在 setup_match 就把真值灌进
+    world_map，且从不调用 mark_being_transported，所以"地图为空"这个状态在仿真里
+    永不出现）。一旦回归，真机上的表现是**开局第一帧就停车退赛（0 分）**，且不可恢复。
+    """
+    print("[10] N-1 终场判定：'看不到目标' 不得等于 '比赛结束'")
+    field = FieldLayout.standard()
+
+    # (a) 开局地图为空（真机头几帧：感知还没建图）
+    wm = WorldMap(field_layout=field)
+    eng = DecisionEngine(wm, my_color=SafeZoneColor.RED)
+    eng.update((300.0, 300.0, 0.0), timestamp=0.0)
+    check("开局地图为空 → 不得置 DONE（否则 t≈0 停车退赛）",
+          eng.strategy_state != StrategyState.DONE,
+          f"strategy={eng.strategy_state.name}")
+
+    # (b) 唯一目标被套住（真机 autonomous_state 会标 BEING_TRANSPORTED）
+    wm2 = WorldMap(field_layout=field)
+    tid = _mk_target(wm2, 5000, (1500.0, 800.0))
+    eng2 = DecisionEngine(wm2, my_color=SafeZoneColor.RED)
+    eng2.update((300.0, 300.0, 0.0), timestamp=0.0)
+    wm2.mark_being_transported(tid)
+    eng2.update((300.0, 300.0, 0.0), timestamp=0.1)
+    check("唯一目标在车上 → 不得置 DONE",
+          eng2.strategy_state != StrategyState.DONE,
+          f"strategy={eng2.strategy_state.name}")
+
+    # (c) 真·时间到 → 仍必须是 DONE（终场停车不能被这次修复改坏）
+    eng3 = DecisionEngine(WorldMap(field_layout=field), my_color=SafeZoneColor.RED)
+    eng3._match_start_time = 0.0
+    eng3.update((300.0, 300.0, 0.0), timestamp=10 ** 6)
+    check("真·时间到 → 仍是 DONE（S-01 终场停车保留）",
+          eng3.strategy_state == StrategyState.DONE,
+          f"strategy={eng3.strategy_state.name}")
+
+    # (d) 终场执行必须带确认窗口，且"时间到"不等待
+    import inspect
+    from rescue_robot.states.autonomous_state import AutonomousState
+    src = inspect.getsource(AutonomousState._run_once)
+    check("非'时间到'的 DONE 必须走确认窗口", "DONE_CONFIRM_S" in src and "_done_since" in src)
+    check("'时间到'必须立即终场（不等确认窗口）", "time_remaining_s <= 0" in src)
+    check("DONE 消失时必须能恢复比赛（复位确认计时）",
+          "self._done_since = None" in src)
+
+
+def test_u4_u5():
+    """U4 减速带越障接线 + U5 现场颜色配置真实生效。"""
+    print("[11] U4 减速带：navigation.update 必须拿到 near_speed_bump")
+    import inspect
+    from rescue_robot.states.autonomous_state import AutonomousState
+    from rescue_robot.perception.field_elements import FieldElementType
+    src = inspect.getsource(AutonomousState._run_once)
+    check("_run_once 把 near_speed_bump 传给导航", "near_speed_bump=" in src)
+    check("存在 _is_near_speed_bump 判定", hasattr(AutonomousState, "_is_near_speed_bump"))
+
+    f = FieldLayout.standard()
+    st = AutonomousState.__new__(AutonomousState)
+    st._field = f
+    n_bumps = len([e for e in f.elements if e.type == FieldElementType.SPEED_BUMP])
+    check("场地里确实有减速带元素", n_bumps >= 3, f"实际 {n_bumps} 条")
+    # 3 号出发区 (150,150) 前方就是减速带带区；场心不该命中
+    check("出发点附近 → 判定接近减速带", st._is_near_speed_bump(150.0, 300.0) is True)
+    check("场心附近 → 判定不在减速带区", st._is_near_speed_bump(1500.0, 1500.0) is False)
+
+    print("[12] U5 现场颜色配置：TEAM_COLOR 严格校验 + YAML 颜色映射真实生效")
+    from rescue_robot.main import resolve_team_color
+    c_red, e_red = resolve_team_color("red")
+    c_blue, e_blue = resolve_team_color("蓝")
+    c_bad, e_bad = resolve_team_color("rd")          # 旧实现会静默当 BLUE！
+    check("TEAM_COLOR=red → RED", c_red is not None and c_red.name == "RED")
+    check("TEAM_COLOR=蓝 → BLUE", c_blue is not None and c_blue.name == "BLUE")
+    check("TEAM_COLOR=rd（拼错）→ **拒绝**而不是静默 BLUE",
+          c_bad is None and e_bad is not None,
+          f"得到 {c_bad} / {e_bad}")
+
+    from rescue_robot.perception.target_types import (
+        get_target_config, set_color_override, PRELIMINARY_TARGETS, TargetColor, TargetShape)
+    from rescue_robot.perception.target_types import CompetitionPhase as _CP
+    default = {"regular": "green", "core": "black",
+               "injured": "orange", "dangerous": "light_blue"}
+    set_color_override(None)
+    check("无覆盖时 get_target_config 原样返回内置表（零行为变化）",
+          get_target_config(_CP.PRELIMINARY) is PRELIMINARY_TARGETS)
+    set_color_override(default)
+    sig = lambda t: sorted((c.name, s.name, i.type.name) for (c, s), i in t.items())
+    check("默认 YAML 颜色与内置表**内容等价**",
+          sig(get_target_config(_CP.PRELIMINARY)) == sig(PRELIMINARY_TARGETS))
+    set_color_override({"regular": "red", "core": "black",
+                        "injured": "orange", "dangerous": "light_blue"})
+    tbl = get_target_config(_CP.PRELIMINARY)
+    check("改 YAML 后 RED 立方体变成普通物资（映射真的生效）",
+          (TargetColor.RED, TargetShape.CUBE) in tbl
+          and tbl[(TargetColor.RED, TargetShape.CUBE)].type.name == "REGULAR_SUPPLY")
+    check("改 YAML 后 GREEN 立方体不再被当普通物资",
+          (TargetColor.GREEN, TargetShape.CUBE) not in tbl)
+    problems = set_color_override({"core": "purple"})
+    check("非法颜色必须被报出（供调用方拒绝启动）", bool(problems), f"problems={problems}")
+    set_color_override(None)      # 复原，避免影响后续断言
+
+
+def test_n6_drop_geometry():
+    """N-6：落点不得被算到围栏上（否则首趟有效投放接近抛硬币）。"""
+    print("[13] N-6 投放落点几何：任意朝向都必须落在本队子区域内")
+    import math
+    from rescue_robot.transport.safe_zone_placer import SafeZonePlacer
+    from rescue_robot.perception.target_types import (PRELIMINARY_TARGETS as _P,
+                                                      TargetColor as _TC,
+                                                      TargetShape as _TS)
+    from rescue_robot.config import Placement as _P2
+
+    f = FieldLayout.standard()
+    info = _P[(_TC.GREEN, _TS.CUBE)]
+    L = _P2.DROP_FORWARD_MM
+    check("DROP_FORWARD_MM 与区域几何相容（红物资区 y 向仅 300mm）", L <= 100.0,
+          f"当前 L={L}；L>100 时落点极易被推到围栏上")
+
+    for color in (SafeZoneColor.RED, SafeZoneColor.BLUE):
+        pl = SafeZonePlacer(f, color)
+        r = pl.target_area_region(info)
+        cx, cy = r.x + r.width / 2, r.y + r.height / 2
+        bad = []
+        for deg in range(0, 360, 15):
+            th = math.radians(deg)
+            raw = (cx + L * math.cos(th), cy + L * math.sin(th))
+            pt = pl.clamp_into_area(raw, info)
+            if not pl.classify(pt, info).is_valid:
+                bad.append(deg)
+        check(f"{color.name} 方物资区：24 个朝向全部有效", not bad,
+              f"仍无效的朝向={bad}（旧实现 9 个朝向里 4 个判 ON_FENCE/超界）")
+
+    print("[14] N-6 反向护栏：首趟规则**不得**被放宽来'假修'")
+    from rescue_robot.transport.load_manager import LoadManager
+    from rescue_robot.perception.target_types import TargetType as _TT
+
+    def _mk2(t):
+        return _P[(_TC.GREEN, _TS.CUBE)].__class__(
+            type=t, color=_TC.GREEN, shape=_TS.CUBE, size_mm=(40, 40, 40),
+            weight_g=100, points=5, material="ABS", description=t.name)
+
+    R_, C_ = _TT.REGULAR_SUPPLY, _TT.CORE_SUPPLY
+    lm = LoadManager()
+    ok1, _ = lm.can_load_batch([_mk2(R_)])
+    ok2, _ = lm.can_load_batch([_mk2(C_)])
+    ok3, _ = lm.can_load_batch([_mk2(R_), _mk2(C_)])
+    check("首趟未完成时 1 个普通物资 → 放行（重做首趟的路径必须通）", ok1 is True)
+    check("首趟未完成时 核心物资 → 拒绝（规则要求，不得放宽）", ok2 is False)
+    check("首趟未完成时 普通+核心 → 拒绝（规则要求，不得放宽）", ok3 is False)
+    lm.mark_first_trip_done()
+    ok4, _ = lm.can_load_batch([_mk2(R_), _mk2(C_)])
+    check("首趟完成后 普通+核心 → 放行", ok4 is True)
+
+    print("[15] N-6 落点判定**不得**被放宽为'车身在区域内也算有效'")
+    import inspect
+    from rescue_robot.transport.transport_pipeline import TransportPipeline as _TP
+    src = inspect.getsource(_TP.update)
+    check("投放判定仍以落点为准（未被放大掩盖真错误）",
+          "clamp_into_area" in src and "is_valid or" not in src,
+          "若出现'落点 or 车身'的或判定，会把'物体落在围栏上'判成有效 → 首趟假成功")
+
+
+def test_n7_n8():
+    """N-7（blocker）：投放判定**不得**被钳制变成恒真；N-8：漏传 release_valid 必须失败关闭。"""
+    print("[16] N-7 投放判定必须保留判别力（钳制只用于瞄准，不用于判定）")
+    import inspect
+    from rescue_robot.transport.transport_pipeline import TransportPipeline as _TP2
+    from rescue_robot.transport.safe_zone_placer import SafeZonePlacer
+    from rescue_robot.perception.target_types import (PRELIMINARY_TARGETS as _P3,
+                                                      TargetColor as _TC3,
+                                                      TargetShape as _TS3)
+    src_upd = inspect.getsource(_TP2.update)
+    check("判定用的是**未钳制**的真实落点",
+          "positions = [base_drop] * len(dropped)" in src_upd,
+          "若判定点来自 clamp_into_area，则 ON_FENCE/OUTSIDE/WRONG_* 分支永不可达")
+    check("钳制只出现在瞄准路径 _nudge_to_valid_drop / _drop_inside",
+          "clamp_into_area" not in src_upd
+          or "positions" not in src_upd.split("clamp_into_area")[0][-200:])
+
+    f = FieldLayout.standard()
+    info = _P3[(_TC3.GREEN, _TS3.CUBE)]
+    pl = SafeZonePlacer(f, SafeZoneColor.RED)
+    bad_pts = [(1500.0, 1500.0, "场地中央"), (1345.0, 2600.0, "紫围栏南侧"),
+               (1500.0, 150.0, "对方安全区"), (1655.0, 2820.0, "伤员区放物资"),
+               (-800.0, 2820.0, "场外西侧")]
+    false_valid = [tag for x, y, tag in bad_pts if pl.classify((x, y), info).is_valid]
+    check("5 个坏落点必须全部判 INVALID（钳制曾让它们全变 valid）", not false_valid,
+          f"被误判为 valid 的：{false_valid}")
+    check("正确落点仍判 valid（判定没被改坏）",
+          pl.classify((1345.0, 2820.0), info).is_valid is True)
+    check("'物资入伤员区'的 -10 分场景可见（原被钳制掩盖）",
+          "伤员区" in pl.classify((1655.0, 2820.0), info).detail)
+
+    print("[17] N-8 漏传 release_valid 必须失败关闭（fail-closed）")
+    from rescue_robot.decision.decision_engine import DecisionEngine as _DE
+    from rescue_robot.perception.world_map import WorldMap as _WM
+    from rescue_robot.perception.target_types import (DetectedTarget as _DT,
+                                                      PRELIMINARY_TARGETS as _P4,
+                                                      CompetitionPhase as _CP4)
+    probe = _DE(_WM(field_layout=FieldLayout.standard()), my_color=SafeZoneColor.RED)
+    probe.start_match()                      # 否则 _match_start_time=0 会直接判 DONE
+    probe._world_map._create_new_target(
+        _DT(id=1, info=next(iter(_P4.values())), position=(1000.0, 1500.0)), 0.0)
+    probe.update((1000.0, 1500.0, 0.0), nav_arrived=True)
+    probe.update((1000.0, 1500.0, 0.0), nav_arrived=True, grip_done=True)
+    probe.update((200.0, 2800.0, 0.0), nav_arrived=True, grip_done=True,
+                 release_done=True)          # ← 故意漏传 release_valid
+    check("漏传 release_valid → 不得据投放完成进入 FREE_RUN",
+          probe.strategy_state != StrategyState.FREE_RUN,
+          f"strategy={probe.strategy_state.name}（旧实现 None→True 会静默放行）")
 
 
 # ---------------------------------------------------------------- 6/9
@@ -212,6 +430,10 @@ def test_s02_and_config():
 def main():
     test_s40_no_phantom_load()
     test_s40_second_half_and_b8()
+    test_terminal_guard()
+    test_u4_u5()
+    test_n6_drop_geometry()
+    test_n7_n8()
     test_s02_and_config()
     print("-" * 66)
     print(f"  S-40 / S-01 / S-02 / B8 回归护栏: {PASS} 通过, {FAIL} 失败")

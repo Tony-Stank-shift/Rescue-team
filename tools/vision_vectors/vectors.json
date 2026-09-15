@@ -1,0 +1,834 @@
+{
+  "schema": 1,
+  "generated_by": "tools/vision_vectors/generate_vectors.py",
+  "deterministic": true,
+  "note": "合成图，非真实照片；固定底色 BGR(128,128,128)，无随机数",
+  "frame_wh": [
+    640,
+    480
+  ],
+  "bg_bgr": [
+    128,
+    128,
+    128
+  ],
+  "records": [
+    {
+      "name": "vec_01_normal_green_cube",
+      "sample": "green_h60",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        "GREEN",
+        "CUBE"
+      ],
+      "old": "REGULAR_SUPPLY",
+      "verdict": "ok",
+      "note": "普通物资基准（绿正方体 40mm）",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_01_normal_green_cube.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "CUBE",
+      "expect_type": "REGULAR_SUPPLY",
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_02_normal_black_pyramid_triangle",
+      "sample": "black_v20",
+      "w_mm": 40,
+      "h_mm": 40,
+      "draw": "triangle",
+      "kind": "pyramid(三角形投影)",
+      "expect": [
+        "BLACK",
+        "TRIANGULAR_PYRAMID"
+      ],
+      "old": "CORE_SUPPLY",
+      "verdict": "ok",
+      "note": "核心物资基准（黑三棱锥 40mm）。★判据要点：**三角形轮廓（顶点3、面积比≈0.53）才是三棱锥的可靠判据**；画成正方形投影时会被判 CUBE（见 vec_19）",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_02_normal_black_pyramid_triangle.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "TRIANGULAR_PYRAMID",
+      "expect_type": "CORE_SUPPLY",
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_03_normal_lightblue_dangerous_cube",
+      "sample": "lightblue_h96",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        "LIGHT_BLUE",
+        "CUBE"
+      ],
+      "old": "DANGEROUS",
+      "verdict": "ok",
+      "note": "危险目标基准（浅蓝正方体 40mm）",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_03_normal_lightblue_dangerous_cube.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "CUBE",
+      "expect_type": "DANGEROUS",
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_04_orange_injured_cuboid_80x40",
+      "sample": "orange_h15",
+      "w_mm": 80,
+      "h_mm": 40,
+      "kind": "cuboid",
+      "expect": [
+        "ORANGE",
+        "CUBOID"
+      ],
+      "old": "REGULAR_SUPPLY",
+      "verdict": "ok",
+      "note": "★回归样本：伤员 80×40 扁盒（15 分/个）。旧实现 CUBE/CUBOID 判据完全重叠且 CUBE 先命中 → 判成 CUBE → 伤员必误判",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_04_orange_injured_cuboid_80x40.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "CUBOID",
+      "expect_type": "INJURED",
+      "blob_boxes": [
+        [
+          280,
+          190,
+          80,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_05_orange_cuboid_front_40x40",
+      "sample": "orange_h15",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cuboid(短边正对相机)",
+      "expect": [
+        "ORANGE",
+        "*"
+      ],
+      "old": "INJURED",
+      "verdict": "limitation",
+      "note": "伤员正对短边成像 40×40 —— **长宽比在此视角下不可区分**（见文档『不可区分清单』），靠『橘色在初赛/决赛都只对应伤员』这一颜色唯一性救回 15 分",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_05_orange_cuboid_front_40x40.png",
+      "kind_expect": "color",
+      "expect_shape": "*",
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_06_black_cube_40x40",
+      "sample": "black_v20",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        "BLACK",
+        "CUBE"
+      ],
+      "old": "CORE_SUPPLY",
+      "verdict": "ok",
+      "expect_type_override": "CORE_SUPPLY",
+      "note": "⚠黑色正方形投影的**形状必然误判**：40×40 方框 → CUBE（真相是三棱锥的正方形投影）。颜色信息（黑=核心物资）把它救成 CORE_SUPPLY；想靠形状认三棱锥必须能看到三角形轮廓",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_06_black_cube_40x40.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "CUBE",
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_07_orange_circle_d40",
+      "sample": "orange_h15",
+      "w_mm": 40,
+      "h_mm": 40,
+      "draw": "circle",
+      "kind": "circle(圆/圆柱/球俯视)",
+      "expect": [
+        "ORANGE",
+        "*"
+      ],
+      "old": "CORE_SUPPLY",
+      "verdict": "limitation",
+      "note": "★判据暴露：φ40 圆（画布真值 顶点=8、面积比=0.71；检测掩码 顶点=6）正好骑在 CUBE 的面积比下界 0.75 之下，顶点数又落进 4~8 → 形状判成 CUBE。颜色/phase 组合救回：橘→伤员。但**决赛的圆柱/球若为白色/其他色，形状必错**",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_07_orange_circle_d40.png",
+      "kind_expect": "color",
+      "expect_shape": "*",
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_08_green_circle_d40",
+      "sample": "green_h60",
+      "w_mm": 40,
+      "h_mm": 40,
+      "draw": "circle",
+      "kind": "circle(决赛圆柱俯视)",
+      "expect": [
+        "GREEN",
+        "*"
+      ],
+      "phase": "PRELIMINARY",
+      "old": "REGULAR_SUPPLY",
+      "verdict": "limitation",
+      "note": "★决赛普通物资（绿圆柱 φ40×60）俯视投影。形状判成 CUBE（应为 CYLINDER）→ 靠 phase=FINAL + 绿色唯一性救回 5 分；若决赛现场圆柱是别的颜色，此路不通",
+      "image": "img/vec_08_green_circle_d40.png",
+      "kind_expect": "color",
+      "expect_shape": "*",
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_09_regression_blue_saturated_h112",
+      "sample": "blue_h112",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        null,
+        null
+      ],
+      "old": "DANGEROUS",
+      "verdict": "phase",
+      "note": "★回归样本：饱和蓝 H=112/S=229。旧实现容差命中 LIGHT_BLUE → 判成危险目标 → 该搬的不搬；现实现 → 未识别（初赛没有蓝色规则）。**在初赛它必须永远不是 DANGEROUS**",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_09_regression_blue_saturated_h112.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_10_regression_pure_blue_h120",
+      "sample": "blue_pure_h120",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        null,
+        null
+      ],
+      "old": "DANGEROUS",
+      "verdict": "phase",
+      "note": "★回归样本：纯蓝 BGR(255,0,0) = H120/S255/V255（最经典的「蓝」）。**在初赛必须检不出/不判危险**；在决赛（phase=FINAL）必须是 BLUE 而不是 LIGHT_BLUE",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_10_regression_pure_blue_h120.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_11_cyan_h90_overlap",
+      "sample": "cyan_h90",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        "LIGHT_BLUE",
+        "CUBE"
+      ],
+      "old": "DANGEROUS",
+      "verdict": "boundary",
+      "note": "⚠薄弱边界：青 H=90/S=255 同时满足 BLUE 与 LIGHT_BLUE 阈值，靠『LIGHT_BLUE 先检测』判为浅蓝(危险)。现场若真出现青色目标会被当危险物排除",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_11_cyan_h90_overlap.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "CUBE",
+      "expect_type": "DANGEROUS",
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_12_blue_h111_gap",
+      "sample": "blue_h111",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        null,
+        null
+      ],
+      "old": "DANGEROUS",
+      "verdict": "phase",
+      "note": "⚠★**阈值空隙（最危险的一条）**：H=111/S=255/V=255 两边都不沾——LIGHT_BLUE 的 H 上界是 110、BLUE 的 H 下界是 95（本该命中），但初赛配置表里没有 BLUE → 该颜色根本不在检测颜色列表里 → **整个目标消失**。蓝系目标只要落到 H≥111，初赛必漏检",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_12_blue_h111_gap.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_13_palepaleblue_h98_s10",
+      "sample": "palepaleblue_h98",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        null,
+        null
+      ],
+      "old": "DANGEROUS",
+      "verdict": "field-calib",
+      "note": "⚠薄弱边界：S=10 的极淡蓝（反光/过曝）—— **实测完全检不出**（LIGHT_BLUE 的 S 下界是 20），危险目标在此光照下会漏检；但若把 S 下界压到 10 以下，白墙/灯光又会大量误检，属于两难，需现场权衡",
+      "tolerant": true,
+      "phase": "PRELIMINARY",
+      "image": "img/vec_13_palepaleblue_h98_s10.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_14_orange_light_s180",
+      "sample": "orange_light_h15",
+      "w_mm": 80,
+      "h_mm": 40,
+      "kind": "cuboid",
+      "expect": [
+        null,
+        null
+      ],
+      "old": "INJURED",
+      "verdict": "field-calib",
+      "note": "⚠★**饱和度边界（现场高发）**：强光下的橘色 S=180 掉到 ORANGE 的 S 下界 205 之下 → **完全检不出** → 15 分/个丢。ORANGE 的 S 下界 205 是排红色用的，必须按现场实物取样值重新标定（见文档建议）",
+      "tolerant": true,
+      "phase": "PRELIMINARY",
+      "image": "img/vec_14_orange_light_s180.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          280,
+          190,
+          80,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_15_orange_s205_boundary",
+      "sample": "orange_s205",
+      "w_mm": 80,
+      "h_mm": 40,
+      "kind": "cuboid",
+      "expect": [
+        "ORANGE",
+        "CUBOID"
+      ],
+      "old": "INJURED",
+      "verdict": "ok",
+      "note": "橘色 S=205 正好压在下界上 → 必须命中（留给现场标定的「最小值」参考）",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_15_orange_s205_boundary.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "CUBOID",
+      "expect_type": "INJURED",
+      "blob_boxes": [
+        [
+          280,
+          190,
+          80,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_16_green_dark_v70",
+      "sample": "green_dark_h60",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        "GREEN",
+        "CUBE"
+      ],
+      "old": "REGULAR_SUPPLY",
+      "verdict": "ok",
+      "note": "阴影里的绿 V=70（GREEN 的 V 下界是 60）→ 仍正确识别",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_16_green_dark_v70.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "CUBE",
+      "expect_type": "REGULAR_SUPPLY",
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_17_green_dark_v55_black_collision",
+      "sample": "green_dark55_h60",
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "expect": [
+        "BLACK",
+        "CUBE"
+      ],
+      "old": "REGULAR_SUPPLY",
+      "verdict": "limitation",
+      "note": "★★**实测碰撞**：绿 V=55 一旦跌破 60，就被 BLACK 全包区间 (S0~255,V0~60) 吃成『黑色核心物资』→ 5 分当 10 分、形状还会被判成三棱锥。现场灯光不足时这是**整块目标串类**的严重风险",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_17_green_dark_v55_black_collision.png",
+      "kind_expect": "color+shape",
+      "expect_shape": "CUBE",
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          300,
+          190,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_18_white_background",
+      "sample": "white_s0",
+      "w_mm": 200,
+      "h_mm": 140,
+      "kind": "flat",
+      "expect": [
+        null,
+        null
+      ],
+      "old": null,
+      "verdict": "ok",
+      "note": "白纸/灯光（S=0,V=255）必须检不出 —— 否则规则⑦的白色标注会被当成目标",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_18_white_background.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          220,
+          140,
+          200,
+          140
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_19_white_wide",
+      "sample": "white_s0",
+      "w_mm": 400,
+      "h_mm": 100,
+      "kind": "flat",
+      "expect": [
+        null,
+        null
+      ],
+      "old": null,
+      "verdict": "ok",
+      "note": "白色宽条（场地边线/白板）必须检不出",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_19_white_wide.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          120,
+          160,
+          400,
+          100
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_20_gray_floor",
+      "sample": "gray_s0",
+      "w_mm": 200,
+      "h_mm": 140,
+      "kind": "flat",
+      "expect": [
+        null,
+        null
+      ],
+      "old": null,
+      "verdict": "ok",
+      "note": "亮灰地面/桌面色（V=128）必须检不出",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_20_gray_floor.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          220,
+          140,
+          200,
+          140
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_21_brown_h18_field",
+      "sample": "brown_h18",
+      "w_mm": 80,
+      "h_mm": 40,
+      "kind": "cuboid",
+      "expect": [
+        null,
+        null
+      ],
+      "old": null,
+      "verdict": "ok",
+      "note": "⚠薄弱边界：木纹/桌面色 H=18/S=180/V=120。靠 ORANGE 的 S 下界 205 躲开，但与『橘色』只隔一个饱和度；场地偏橘时首选误检对象",
+      "phase": "PRELIMINARY",
+      "image": "img/vec_21_brown_h18_field.png",
+      "kind_expect": "none",
+      "expect_shape": null,
+      "expect_type": null,
+      "blob_boxes": [
+        [
+          280,
+          190,
+          80,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    },
+    {
+      "name": "vec_22_lightblue_vs_blue_sbs",
+      "sample": null,
+      "w_mm": 40,
+      "h_mm": 40,
+      "kind": "cube",
+      "image": "img/vec_22_lightblue_vs_blue_sbs.png",
+      "phase": "PRELIMINARY",
+      "blobs": [
+        {
+          "sample": "lightblue_h96",
+          "color": "LIGHT_BLUE",
+          "shape": "CUBE",
+          "expect_type": "DANGEROUS",
+          "expect_color": "LIGHT_BLUE"
+        },
+        {
+          "sample": "blue_pure_h120",
+          "color": "BLUE",
+          "shape": null,
+          "expect_type": "*",
+          "expect_color": "BLUE"
+        }
+      ],
+      "side_by_side": true,
+      "note": "★回归样本：浅蓝与蓝**并排同帧** —— 两者必须分别判对；旧实现两块都会落进重叠阈值，靠『先到先得』互相串色",
+      "old_each": [
+        "DANGEROUS",
+        "DANGEROUS"
+      ],
+      "verdict": "limitation",
+      "blob_boxes": [
+        [
+          260,
+          220,
+          40,
+          40
+        ],
+        [
+          340,
+          220,
+          40,
+          40
+        ]
+      ],
+      "bg_bgr": [
+        128,
+        128,
+        128
+      ],
+      "frame_wh": [
+        640,
+        480
+      ]
+    }
+  ]
+}

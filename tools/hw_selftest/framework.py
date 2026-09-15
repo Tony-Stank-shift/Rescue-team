@@ -84,6 +84,7 @@ ORDER = [
     "decision",     # 纯算法
     "navigation",   # 纯算法
     "transport",    # 纯算法（Mock 夹爪）
+    "accounting",   # 纯算法：载荷台账一致性（S-40 假装载）+ 终场/场心误判（S-01/B8）
     "serial",       # 串口链路
     "telemetry",    # 下位机数据流
     "start_button", # 一键启动链路

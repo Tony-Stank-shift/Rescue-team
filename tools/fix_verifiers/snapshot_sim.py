@@ -40,8 +40,9 @@ for s in seeds:
     dv = [t for t in sim.targets if t.delivered]
     vd = [t for t in dv if t.delivered_valid]
     err = [e for e in sim.events if "ERROR" in e]
-    print("RESULT %%d %%s %%d/%%d %%d %%s" %% (
-        s, f["score"], len(dv), len(sim.targets), len(vd), err[:1]))
+    print("RESULT|%%d|%%s|%%d|%%d|%%d|%%s" %% (
+        s, f["score"], len(dv), len(sim.targets), len(vd),
+        (err[0][:40] if err else "")))
 '''
 
 
@@ -71,8 +72,8 @@ def run(snap):
                           capture_output=True, text=True)
     rows = []
     for line in proc.stdout.splitlines():
-        if line.startswith("RESULT "):
-            _, seed, score, dv, total, vd, err = line.split(" ", 5)
+        if line.startswith("RESULT|"):
+            _, seed, score, dv, total, vd, err = line.split("|")
             rows.append((seed, score, dv, total, vd, err.strip()))
     if not rows:
         print("  ⚠️  无结果输出，stderr 尾部：")
