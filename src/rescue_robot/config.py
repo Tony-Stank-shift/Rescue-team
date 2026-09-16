@@ -76,21 +76,48 @@ class Thresholds:
 # ============================================================
 class Placement:
     """
-    机构几何标定参数。
+    机构几何标定参数 —— **夹爪 V2**（2026-09-16 机构变更后）。
 
-    DROP_FORWARD_MM：释放瞬间，目标（在车头 U 型槽内）相对**车心**的前伸距离。
+    ── 机构实物（实测自 SolidWorks 装配体 `装配体3 - 夹爪-2-2.STL`，2600 面）──
+    套取方式**不变**：自上而下套住目标；舵机行程**不变**（套住 0° / 释放 70°，
+    对齐下位机 `servo.h`）。**旧描述中的"U 型槽"已不存在**，本类及相关注释
+    已按新机构改写。
+
+      ① 套取开口：**150mm(横向) × 100mm(前后)** 的方形框（框高 60.7mm）。
+         见 ``SLEEVE_OPENING_MM``。物理含义：目标必须落在
+         **横向 ±75mm、前后 ±50mm** 的矩形内，套下去才真的套得住。
+
+      ② 框后方三块**平行于地面的水平实心板**，自上而下依次变小：
+           上板 157 × 40mm（最高、最大）
+           中板 150 × 35mm
+           下板 150 × 20mm（最低、最小）
+         三块板用于**在斜坡上推目标**，按目标类型分工（机构是被动的，
+         哪块板受力由目标高度决定，软件无需选择）：
+           上板 + 中板 → 推 **橙色长方体（伤员）** 与 **绿色正方体（普通物资）**
+           下板 + 中板 → 推 **黑色三棱锥（核心物资）**
+         → 旧代码里"舵机带着单块后方板渐进上调"的那套动作，其**升降来源
+           已由舵机改为这三块固定阶梯板**；舵机在推入过程中只需保持套住态，
+           推入结束再一次性释放。见 ``transport_pipeline`` 的 ``PLACING`` 相。
+
+    ── 标定参数 ──
+    SLEEVE_OPENING_MM：套取开口 (横向, 前后) mm。**捕获判据必须用它**——
+      旧代码只用 ``CAPTURE_RADIUS_MM`` 一个圆（150mm），与 150×100 的**矩形**
+      开口不匹配：目标在圆内但在开口外时，软件会记成"已套住"，实车却套空
+      （与 S-40 同族的"幽灵捕获"）。现已按矩形开口复核。
+    DROP_FORWARD_MM：释放瞬间，目标（在套取框内）相对**车心**的前伸距离。
       投放有效性判定必须用它把"车身位置"换算成"目标落点"：
         drop_point = (x + L·cosθ, y + L·sinθ)
       误差直接决定"有效/无效投放"，也就决定首趟成败。
-      ⚠️ 必须真机标定：把目标放进槽里量前伸距离，再改 YAML。
+      ⚠️ 必须真机标定：把目标放进框里量前伸距离，再改 YAML。
     PUSH_DIST_MM：推式放置时朝斜坡方向的推入距离（同样需真机标定）。
 
     SLEEVE_MAX_HOLD：一趟最多能**真正套住**几个目标 = 套取机构的物理容量。
-      默认 1：本车 U 型槽由单只 SG90 驱动，"套住(0°) / 释放(70°)"只有一个
-      自由度，且每次下压前都必须先抬爪（抬爪 = 释放）→ 先前套住的目标会被放掉。
-      因此"一趟带 3 个"在物理上不成立。**必须默认 1**，否则软件会把根本没带上
-      的目标也算作已送达（虚高得分；首趟"必须且仅送 1 个"还会假成功）。
-      ⚠️ 仅当机构组确认"槽内可同时容纳多个且行进中不脱落"时才可调大；
+      默认 1（**机构组已确认夹爪 V2 仍为 1**）：单只 SG90 驱动，"套住(0°) /
+      释放(70°)"只有一个自由度，且每次下压前都必须先抬爪（抬爪 = 释放）→
+      先前套住的目标会被放掉。因此"一趟带 3 个"在物理上不成立。
+      **必须默认 1**，否则软件会把根本没带上的目标也算作已送达（虚高得分；
+      首趟"必须且仅送 1 个"还会假成功）。
+      ⚠️ 仅当机构组确认"框内可同时容纳多个且行进中不脱落"时才可调大；
          调大后必须先回归集成仿真（决策引擎 grip_done 耦合需同步调整）。
     """
     # N-6：150mm 太大 —— 红方物资区 y 向只有 300mm（完全置入可用 280mm），
@@ -100,6 +127,27 @@ class Placement:
     DROP_FORWARD_MM: float = 70.0
     PUSH_DIST_MM: float = 100.0
     SLEEVE_MAX_HOLD: int = 1
+
+    # 夹爪 V2 套取开口 (横向, 前后) mm —— 实测 STL：X 63.5..213.5=150.0,
+    # Z 1255.3..1355.3=100.0。捕获判据用它做矩形复核，避免"套空却记账"。
+    SLEEVE_OPENING_MM: tuple = (150.0, 100.0)
+
+    # ── 套取接近闸门（夹爪 V2 必须重标）──
+    # 旧值 150.0 是按旧机构定的：150 的**圆**与 V2 的 150×100 **矩形**开口不匹配
+    # （半宽 75 / 半深 50），且开口中心约在车心前方 DROP_FORWARD_MM=70 处 →
+    # 目标与车心的前后距离必须落在 **[70-50, 70+50] = [20, 120]mm** 才在开口正下方。
+    # **150 落在该区间之外 → 真机必然套空**（软件却会记账成功 = 幽灵捕获）。
+    # 取 100：位于合法区间内、距远端边界留 20mm 余量，又不苛求导航精度到 70。
+    # ⚠️ 真机标定：若导航能把目标稳定送到开口中心，可下调到 70（余量最大）。
+    # 仿真对该值在 80~150 区间**不敏感**（实测四种取值结果逐位一致），故改动不影响回归。
+    CAPTURE_RADIUS_MM: float = 100.0
+
+    # ── 投放时的分步上调次数 ──
+    # 4 = 保留旧行为（推入过程中舵机 0°→70° 分 4 步渐进抬）。
+    # 0  = 推入全程保持 0°（套住），到位后一次性释放。
+    # 夹爪 V2 的**推升来源已改为三块固定阶梯板**，故旧"舵机带板渐进上调"不再是
+    # 升力来源；0 还是 4 哪个更稳属真机标定项（见 docs/GRIPPER_V2_GEOMETRY.md）。
+    PROGRESSIVE_RAISE_STEPS: int = 4
 
 
 placement = Placement()
@@ -143,8 +191,9 @@ class Camera:
     FOV_DEG: float = 77.0         # 视场角（硬件：800W 77°）
     RES: tuple = (640, 480)       # 处理分辨率 (W, H)
 
-    # ── 套取视觉确认（本车无硬件"套住检测"，用摄像头看 U 型槽是否有目标）──
-    # U 型槽在图像中的区域，**归一化**坐标 (x1, y1, x2, y2)，相对图像宽高 ∈ [0,1]。
+    # ── 套取视觉确认（本车无硬件"套住检测"，用摄像头看套取框里是否有目标）──
+    # 套取框（夹爪 V2：150×100 方形开口）在图像中的区域，**归一化**坐标
+    # (x1, y1, x2, y2)，相对图像宽高 ∈ [0,1]。
     # ⚠️ 必须真机标定：把目标放进槽里，看槽落在图像哪个区域，再把这里改成实测值。
     SLEEVE_ROI: tuple = (0.32, 0.55, 0.68, 0.98)
     # 是否启用套取视觉确认（ROI 未标定/看不到槽时可先关掉）
@@ -194,6 +243,44 @@ def apply_robot_config(cfg) -> None:
     if pl is not None:
         Placement.DROP_FORWARD_MM = pl.drop_forward_mm
         Placement.PUSH_DIST_MM = pl.push_dist_mm
+        # 夹爪 V2 套取开口 [横向, 前后] mm —— 现场若换了框（150×100 为当前值）在此改
+        _open = getattr(pl, "sleeve_opening_mm", None)
+        if _open is not None:
+            try:
+                _ow, _od = float(_open[0]), float(_open[1])
+                if _ow > 0 and _od > 0:
+                    Placement.SLEEVE_OPENING_MM = (_ow, _od)
+                else:
+                    raise ValueError("must be positive")
+            except (TypeError, ValueError, IndexError):
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    f"placement.sleeve_opening_mm 非法（应为 [横向, 前后] 两个正数）"
+                    f"→ 沿用 {Placement.SLEEVE_OPENING_MM}")
+        # 套取接近闸门（夹爪 V2 关键标定项，见 SLEEVE_OPENING_MM 上方推导）
+        _cap = getattr(pl, "capture_radius_mm", None)
+        if _cap is not None:
+            try:
+                _capv = float(_cap)
+                if _capv > 0:
+                    Placement.CAPTURE_RADIUS_MM = _capv
+                else:
+                    raise ValueError("must be positive")
+            except (TypeError, ValueError):
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    f"placement.capture_radius_mm 非法 → 沿用 "
+                    f"{Placement.CAPTURE_RADIUS_MM}")
+        # 投放分步上调次数（0 = 保持套住到到位后一次性释放）
+        _steps = getattr(pl, "progressive_raise_steps", None)
+        if _steps is not None:
+            try:
+                Placement.PROGRESSIVE_RAISE_STEPS = int(_steps)
+            except (TypeError, ValueError):
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    f"placement.progressive_raise_steps 非法 → 沿用 "
+                    f"{Placement.PROGRESSIVE_RAISE_STEPS}")
         # 机构容量：夹到 [1,3]（规则上限 3 个/趟）
         # ⚠️ >1 目前**未接线完成**，必须挡掉：多目标逐个套取的机构侧已实现，但
         #    决策引擎的 grip_done 契约仍假设"一趟只套 1 个"，容量 >1 时决策会在

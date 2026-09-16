@@ -286,13 +286,19 @@ class ServoSleeveLift(AbstractSleeveLift):
         self._state.timestamp = time.time()
         # TODO: 真实 PWM 输出（RDK/STM32 的 PWM 接口）
 
-    # 放置（推+上调）：U型槽后方实心板，推入时渐进上调跨过紫边斜坡（外低内高）
+    # 放置（推入 + 上坡）——夹爪 V2：升降来源是三块**固定水平阶梯板**
+    #   上板+中板 → 推橙色长方体(伤员) / 绿色正方体(普通物资)
+    #   下板(最小)+中板 → 推黑色三棱锥(核心物资)
+    # 舵机行程保持 0°(套住) ⇄ 70°(释放)；本函数的"渐进"仅用于平滑卸力，
+    # 真正把目标推上紫边斜坡的是**底盘前进 + 固定阶梯**。
+
     RAMP_ANGLE_DEG = 34.0   # 斜坡角度（30 宽 / 20 高 ≈ 34°）
     RAMP_STEPS = 4          # 渐进上调步数
 
     def place_ramp(self) -> bool:
         """放置：舵机从 0°(套住) 渐进抬起到 70°(释放)，配合底盘前进"推"入放置区。
 
+        夹爪 V2：推升由**三块固定阶梯板**完成，本函数只负责平滑释放。
         ⚠️ 精确角度序列 / 与底盘前进的协同需真机标定（SG90 定位，斜坡 34°）。
         """
         released = self._state.holding_ids.copy()
@@ -329,6 +335,18 @@ class SerialServoLift(AbstractSleeveLift):
 
     依赖一个具备 send_servo() / wait_for() 方法的 chassis 对象
     （即 SerialChassis），用 duck typing 避免循环依赖。
+
+    ── 夹爪 V2（2026-09-16 机构变更）──
+    实物为 SolidWorks 装配体 ``装配体3 - 夹爪-2-2.STL``（2600 面实测）：
+      - 套取方式**不变**：自上而下套住目标；舵机行程**不变**（0° 套住 / 70° 释放，
+        对齐下位机 ``servo.h``）。
+      - 套取开口 **150mm(横向) × 100mm(前后)** —— 目标必须落在
+        横向 ±75mm、前后 ±50mm 的矩形内才真套得住（见 ``config.Placement.SLEEVE_OPENING_MM``）。
+        ⚠️ 旧代码只有 ``CAPTURE_RADIUS_MM`` 一个**圆**判据，对 150×100 的**矩形**开口
+        偏大，会出现"软件记账套住、实车套空"（与 S-40 同族的幽灵捕获）。
+      - 框后方三块**平行于地面的水平固定板**，自上而下递减：
+        上板 157×40 / 中板 150×35 / 下板 150×20（最小）。
+        V2 的**上坡推升来源就是这三块固定板**（不再靠舵机带着单块板渐进上调）。
     """
 
     MOVE_TIME_S = 0.4  # 机械动作耗时（等舵机到位）
@@ -414,7 +432,12 @@ class SerialServoLift(AbstractSleeveLift):
     def is_holding(self) -> bool:
         return self._state.holding_count > 0
 
-    # 放置（推+上调）：U型槽后方实心板，推入时渐进上调跨过紫边斜坡（外低内高）
+    # 放置（推入 + 上坡）——夹爪 V2：升降来源是三块**固定水平阶梯板**
+    #   上板+中板 → 推橙色长方体(伤员) / 绿色正方体(普通物资)
+    #   下板(最小)+中板 → 推黑色三棱锥(核心物资)
+    # 舵机行程保持 0°(套住) ⇄ 70°(释放)；本函数的"渐进"仅用于平滑卸力，
+    # 真正把目标推上紫边斜坡的是**底盘前进 + 固定阶梯**。
+
     ANGLE_LOWERED_DEG = 0.0     # 下压套住（对齐下位机 servo.h）
     ANGLE_RAISED_DEG = 70.0     # 抬起/释放
     RAMP_ANGLE_DEG = 34.0
@@ -423,7 +446,10 @@ class SerialServoLift(AbstractSleeveLift):
     def place_ramp(self) -> bool:
         """放置：发 SERVO,ANGLE 渐进抬起（0→70），配合底盘前进"推"入放置区。
 
-        ⚠️ 精确角度序列 / 与底盘前进协同需真机标定（斜坡 34°，SG90 定位）。
+        夹爪 V2：推升由**三块固定阶梯板**完成，本函数只负责平滑释放。
+        ⚠️ 精确角度序列 / 与底盘前进协同需真机标定（斜坡 34°，SG90 定位）；
+           若真机发现"推入途中就应保持 0°不动、到位后再一次性释放"，
+           把 ``placement.progressive_raise_steps`` 设为 0（见 config 的 Placement）。
         """
         released = self._state.holding_ids.copy()
         for step in range(self.RAMP_STEPS + 1):

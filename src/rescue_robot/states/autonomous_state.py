@@ -132,7 +132,7 @@ class AutonomousState:
         #    否则底盘会一直执行最后一帧速度指令，靠看门狗 ~800ms 后才停（会前冲一段）。
         if chassis is not None:
             self._transport.set_stop_callback(self._stop_chassis)
-        # ② 套取视觉确认：本车没有"套住检测"传感器 → 用摄像头看 U 型槽里有没有目标。
+        # ② 套取视觉确认：本车没有"套住检测"传感器 → 用摄像头看套取框里有没有目标。
         #    只在真机摄像头可用时启用（Mock/无摄像头时保持"假设成功"，避免误判重试）。
         if camera is not None:
             self._transport.set_sleeve_confirm(self._perception.check_sleeve_occupied)

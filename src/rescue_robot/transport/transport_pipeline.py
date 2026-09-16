@@ -101,12 +101,25 @@ class TransportPipeline:
         self._total_targets_delivered = 0
         self._total_score = 0
 
-        # 放置（推+上调）框架参数 —— ⚠️ 真机需标定
-        self._place_steps = 4           # 放置分步上调次数
+        # 放置（推入 + 上坡）框架参数 —— ⚠️ 真机需标定（夹爪 V2，见 config.Placement）
+        # 分步上调次数来自 YAML：4=旧行为（推入中 0°→70° 分 4 步渐进抬），
+        # 0=推入全程保持 0°套住、到位后一次性释放。V2 的推升来源是三块固定阶梯板。
+        try:
+            self._place_steps = max(0, int(getattr(
+                cfg_placement, "PROGRESSIVE_RAISE_STEPS", 4)))
+        except (TypeError, ValueError):
+            self._place_steps = 4
         self._place_step = 0            # 当前放置步
         self._place_started = False     # 是否已开始推式放置
         # 推入斜坡距离 / 落点前伸量：真机标定项，来自 config.Placement（YAML 可改）
         self._push_dist_mm = float(getattr(cfg_placement, "PUSH_DIST_MM", 100.0))
+        # 套取接近闸门：夹爪 V2 关键标定项 —— 必须 ≤ 开口中心(70) + 半深(50) = 120，
+        # 否则目标不在套取框正下方（软件会记账成功、实车套空）。详见 config.Placement。
+        try:
+            self.CAPTURE_RADIUS_MM = float(getattr(
+                cfg_placement, "CAPTURE_RADIUS_MM", self.CAPTURE_RADIUS_MM))
+        except (TypeError, ValueError):
+            pass
         # 套取机构物理容量（一趟最多真正套住几个）：默认 1，见 config.Placement
         try:
             self._sleeve_max_hold = max(
@@ -442,7 +455,7 @@ class TransportPipeline:
                 success = self._sleeve.lower(positions)
             else:
                 success = self._sleeve.lower_with_retry(positions, max_retries=3)
-            # 无硬件"套住检测"→ 用摄像头确认 U 型槽里确实套住了目标。
+            # 无硬件"套住检测"→ 用摄像头确认**套取框（夹爪 V2：150×100）**里确实套住了目标。
             # 不可靠的确认（异常）按成功处理，避免误判导致无休止重试。
             if success and self._sleeve_confirm is not None:
                 try:
@@ -459,7 +472,7 @@ class TransportPipeline:
                             f"视觉确认连续 {self._confirm_fail_streak} 次判失败 → 自动关闭视觉确认；"
                             "请检查 Camera.SLEEVE_ROI 是否已按真机标定")
                         self._sleeve_confirm = None
-                    logger.warning("视觉确认：U 型槽内未见目标 → 判为套取失败，将抬爪后退重试")
+                    logger.warning("视觉确认：套取框内未见目标 → 判为套取失败，将抬爪后退重试")
                     success = False
                 else:
                     self._confirm_fail_streak = 0
@@ -578,7 +591,7 @@ class TransportPipeline:
 
             # 步伐走完 → 投放判定 + 释放
             # ⚠️ 必须按**目标实际落点**判定，不能用车身位置：
-            # 目标在车头 U 型槽内（前伸 L≈DROP_FORWARD_MM），释放瞬间它落在车身前方，
+            # 目标在车头套取框（夹爪 V2：150×100）内（前伸 L≈DROP_FORWARD_MM），释放瞬间它落在车身前方，
             # 用 (rx,ry) 判会系统性偏移一个 L —— 投对了被判无效（丢分/首趟失败），
             # 投错了被判有效（首趟"假成功"→ 按规则后续全部无效）。
             # N-6：落点还要**投影钳回本队该类型子区域**内 —— 红方物资区 y 向只有 300mm
@@ -745,7 +758,10 @@ class TransportPipeline:
         """
         import math
         x, y, theta = pose[0], pose[1], pose[2]
-        L = float(getattr(cfg_placement, "DROP_FORWARD_MM", 150.0))
+        # 兜底值必须与 config.Placement.DROP_FORWARD_MM 一致：旧代码写死 150.0，
+        # 而 150 正是 N-6 证明"会把落点推到围栏上"的坏值（真值 70）。属性必定存在，
+        # 故这里直接用类属性，杜绝"兜底值比真值更糟"的隐患。
+        L = float(getattr(cfg_placement, "DROP_FORWARD_MM", 70.0))
         return (x + L * math.cos(theta), y + L * math.sin(theta))
 
     @staticmethod

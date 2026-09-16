@@ -92,6 +92,15 @@ _ROBOT_SCHEMA = {
     # >1 会被 config.apply_robot_config 强制回退到 1 并打 ERROR（机构只有一个自由度）
     "robot.placement.sleeve_max_hold": (int, lambda v: 1 <= v <= 3),
     "robot.placement.penalty_per_target": (int, lambda v: 0 <= v <= 100),
+    # ---- 夹爪 V2（150×100 方形套取框 + 后方三块阶梯板）----
+    # 套取开口 [横向, 前后] mm
+    "robot.placement.sleeve_opening_mm": (
+        list, lambda v: len(v) == 2 and all(
+            isinstance(x, (int, float)) and 1 <= x <= 1000 for x in v)),
+    # 套取接近闸门 mm：必须 ≤ 开口中心(70) + 半深(50) = 120，否则目标不在框正下方
+    "robot.placement.capture_radius_mm": ((int, float), lambda v: 1 <= v <= 500),
+    # 投放分步上调次数：0 = 到位后一次性释放
+    "robot.placement.progressive_raise_steps": (int, lambda v: 0 <= v <= 20),
 }
 
 # 场地配置 schema
@@ -543,7 +552,14 @@ class PlacementConfig:
     套取/投放机构几何与扣分（现场标定项，无需重编译）。
 
     ⚠️ 这几个值是**机构标定参数**，必须真机实测后填：
-      - drop_forward_mm：释放瞬间目标（在 U 型槽内）相对车心的前伸距离，
+      - sleeve_opening_mm：夹爪 V2 套取开口 [横向, 前后] mm（实测 150×100）。
+        目标必须落在横向 ±75、前后 ±50 内才真套得住。
+      - capture_radius_mm：套取接近闸门 mm。必须 ≤ 开口中心(70) + 半深(50) = 120，
+        否则目标不在套取框正下方 → 软件记账套住、实车套空（幽灵捕获）。
+        旧值 150 对 V2 的 150×100 开口**必然套空**，故默认改为 100。
+      - progressive_raise_steps：投放分步上调次数。4=旧行为（推入中 0→70 分步渐进抬）；
+        0=保持套住到到位后一次性释放。V2 的推升来源是三块固定阶梯板。
+      - drop_forward_mm：释放瞬间目标（在套取框内）相对车心的前伸距离，
         用于把"车身位置"换算成"目标落点"，投放有效性判定就是按它算的；
       - push_dist_mm：推式放置时向斜坡方向的推入距离。
       - sleeve_max_hold：一趟能**真正套住**几个目标（套取机构物理容量）。
@@ -553,9 +569,20 @@ class PlacementConfig:
         =3 只送 4 个 / 50 分，比 =1 的 7~8 个 / 80 分更差，还会让软件把没带上的
         目标谎报为已送达）。详见 docs/audit/FIXES.md 的 S-40。
     """
-    drop_forward_mm: float = 150.0
+    # ⚠️ 默认值必须与 config.Placement 的真值一致：旧默认写 150.0，而 150 正是
+    #    N-6 证明"会把落点推到围栏上"的坏值（真值 70）——任何漏写该项的 robot YAML
+    #    都会静默拿到坏值。已改为 70.0。
+    drop_forward_mm: float = 70.0
     push_dist_mm: float = 100.0
     sleeve_max_hold: int = 1
+    # 夹爪 V2（150×100 方形套取框）：开口 [横向, 前后] mm
+    sleeve_opening_mm: List[float] = field(default_factory=lambda: [150.0, 100.0])
+    # 套取接近闸门 mm：必须落在 [开口中心 70 − 半深 50, 开口中心 70 + 半深 50]
+    # = [20, 120] 内，否则目标不在套取框正下方（软件记账成功、实车套空）。
+    capture_radius_mm: float = 100.0
+    # 投放分步上调次数：4=推入中 0°→70° 分步渐进抬（旧行为）；0=保持套住到到位后一次释放。
+    # 夹爪 V2 的推升来源是三块固定阶梯板，0/4 属真机标定项。
+    progressive_raise_steps: int = 4
     # ❓ 该数值来源不明：PDF 只写"无效目标被取出重新随机放置场地中央"，
     #    未给扣分细则；暂按 10 分/个，待现场确认后修改。
     penalty_per_target: int = 10

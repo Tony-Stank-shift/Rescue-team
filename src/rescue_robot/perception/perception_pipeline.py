@@ -119,9 +119,10 @@ class PerceptionPipeline:
     def check_sleeve_occupied(self, roi_norm=None,
                               min_confidence: float = 0.35) -> Optional[bool]:
         """
-        判断 U 型槽内是否检测到目标（本车无硬件"套住检测"时的视觉替代）。
+        判断套取框（夹爪 V2：150×100 方形开口）内是否检测到目标
+        （本车无硬件"套住检测"时的视觉替代）。
 
-        判据：检测框中心落在归一化 ROI 内即认为槽里有东西。
+        判据：检测框中心落在归一化 ROI 内即认为框里有东西。
         ROI 来自 ``config.Camera.SLEEVE_ROI``（归一化，需真机标定）。
 
         Returns:
