@@ -1,0 +1,24 @@
+# 第三方库与编译产物：体积大且可由 CubeMX / 编译完全重新生成，不入库
+# 取得方式见 README.md §1
+Drivers/
+build/
+
+# CubeIDE / CubeMX 工程元数据（CubeMX 重新生成即有，无需入库）
+.mxproject
+.settings/
+.cproject
+.project
+
+# 编译中间产物
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.su
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
