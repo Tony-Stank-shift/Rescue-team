@@ -26,7 +26,7 @@ firmware/
 ├── CMakeLists.txt            构建定义
 ├── CMakePresets.json         Debug / Release 预设
 ├── cmake/                   工具链文件
-├── STM32F103XX_FLASH.ld     链接脚本（**假定 FLASH 64KB**）
+├── STM32F103XX_FLASH.ld     链接脚本（`LENGTH = 64K`；**实测芯片是 128K**，见 §4.4）
 ├── startup_stm32f103xb.s    启动文件（xB = 128KB 型号）
 └── rescue_f103c8.ioc        CubeMX 配置（引脚复用、外设、时钟的唯一来源）
 ```
@@ -129,10 +129,66 @@ cd "C:/Users/Tony Huang/rescue_f103c8/build/Debug"
 
 > `-v` 会逐字节校验写进去的镜像与 `.elf` 一致 —— 这是"**单片机已同步**"的证据。
 
-> ⚠️ 若 ST-Link 曾被 `usbipd attach` 直通给 WSL，Windows 侧会看不到它 →
-> 需先 `usbipd detach --busid <id>`（**需要管理员权限**）。
+### 4.3 更推荐：只读校验（不写入、不复位）
 
-### 4.3 验证固件真的在跑（在 RDK 上）
+`-w ... -v` 是"写成这份镜像并校验"，它证明的是**结果**。
+如果想证明"**芯片此刻就已经是**这份镜像"（比如核查别人递过来的板子、
+或不想因为复位而误触发一键启动），用下面这条**只读**办法：
+
+```bash
+OBJCOPY=".../bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-objcopy.exe"
+PRG=".../bundles/programmer/2.23.0/bin/STM32_Programmer_CLI.exe"
+ELF='C:\Users\Tony Huang\rescue_f103c8\build\Debug\rescue_f103c8.elf'
+
+# 1) ELF → Flash 镜像（objcopy 按 LMA 排布，就是烧录内容）
+"$OBJCOPY" -O binary "$ELF" fw_from_elf.bin          # 本工程 = 37548 字节
+# 2) 从芯片读回同长度（-u = upload，只读）
+"$PRG" -c port=SWD -u 0x08000000 37548 fw_from_chip.bin
+# 3) 逐字节比对
+cmp fw_from_elf.bin fw_from_chip.bin && echo "芯片与源码编出的镜像完全一致"
+```
+
+**2026-09-17 实测结果**：两侧均 `37548` 字节、
+`md5 d7645a16e6c6fd64277fdc3bc5a817da`，`cmp` 零差异 ✅
+
+### 4.4 芯片实测参数 与 两个已知坑
+
+| 项 | 值 |
+|---|---|
+| `Device ID` | `0x410` → STM32F101/F102/F103 Medium-density |
+| `Revision ID` | `Rev A` |
+| **`NVM size`** | **128 KBytes** |
+| `Device CPU` | Cortex-M3 |
+| 固件占用 | 37548 字节 ≈ 64K 的 **57.3%**（与编译日志 `FLASH 57.29%` 吻合） |
+
+#### 坑 1：链接脚本写 64K，但片子是 128K
+
+`STM32F103XX_FLASH.ld:59` 是 `LENGTH = 64K`，而探针实测 `NVM size = 128 KBytes`
+（STM32F103C8 标称 64K，但这批片子实际有 128K）。
+**当前固件只用 57%，没触顶，无害。** 但若将来固件涨到 64K 以上，
+会**先撞链接脚本的墙**而不是片子的墙 —— 届时把 `LENGTH` 改成 `128K` 即可。
+
+#### 坑 2：用过 `usbipd` 直通后，烧录会连不上（**不是接线坏了**）
+
+如果之前把 ST-Link 用 `usbipd bind/attach` 直通给过 WSL，那么即使 `detach` 了，
+Windows 侧仍会留下**残留设备状态**，表现为 `ST-LINK error (DEV_CONNECT_ERR)`，
+甚至连探针信息都读不出来。**此时 `Get-PnpDevice` 仍显示 `Status OK`、
+`ProblemCode = 0`、驱动是正常的 WinUSB —— 这些指标全都无法暴露问题。**
+
+**解决：拔掉 ST-Link 的 USB，等几秒重插。** 一般立刻恢复。
+
+**判断该不该去拆 SWD 线的关键判据** —— 看 `--list` 里探针的 `FW` 版本：
+
+| `STM32_Programmer_CLI --list` 的表现 | 病在哪 | 该查什么 |
+|---|---|---|
+| `ST-LINK FW` **为空**，`SN` 是一串 `5&xxxx&0&N`（Windows 实例路径） | **主机 ↔ 探针** | 拔插 USB/换口、usbipd 残留、USB 过滤驱动。**别动 SWD 线** |
+| `SN` 是 `37FF...` 之类的**真实序列号**，`FW` 有值（如 `V2J37S7`），但连不上目标 | **探针 ↔ 目标** | SWD 座 / 共地 / SWCLK-SWDIO 反接 / VTref / NRST |
+
+> 原理：**读探针的 FW 版本只需要 USB，完全不需要目标板。**
+> 所以"FW 读不出来"必然与 SWD 接线无关。
+> 本次就是这种情况 —— 一度误判为接线问题，实际重插 USB 后一次就连上了。
+
+### 4.5 验证固件真的在跑（在 RDK 上）
 
 ```bash
 # 应当持续刷出 ODOM/IMU/TEL（约 84 行/秒）
@@ -142,6 +198,10 @@ timeout 3 head -c 400 /dev/ttyS1 | wc -c        # 远大于 0
 ```bash
 cd ~/rescue && PYTHONPATH=src python3 tools/hw_selftest.py --only serial,telemetry,servo
 ```
+
+> ⚠️ 若 ST-Link 曾被 `usbipd attach` 直通给 WSL，Windows 侧会看不到它 →
+> 需先 `usbipd detach --busid <id>`（**需要管理员权限**）。
+> **但注意 `detach` 并不够** —— 残留状态还会导致连不上，见 §4.4 坑 2。
 
 ---
 

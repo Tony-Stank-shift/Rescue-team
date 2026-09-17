@@ -209,7 +209,7 @@ cd ~/rescue && TEAM_COLOR=red START_ZONE=2 START_HEADING_DEG=45 ./run.sh
 | 6 | 视觉误报 | 真实地面实测：绿色物体被分类成「普通物资（初赛）绿色正方体」→ 会让首趟做废（首趟必须且仅 1 个普通物资）。待加面积上限 + 形状合理性校验 |
 | 7 | RDK 系统时间未对时 | 显示 2000-01-01，日志时间戳失真 |
 | 8 | `run.sh` 写死 `SKIP_CAMERA_CHECK=1` | 相机坏也放行 → 感知降级 Mock → 车追假目标。现场建议去掉；**但必须先确认去掉后自检不会卡**（它当初就是为了绕开这个才写死的），改前单独跑一次 `SKIP_CAMERA_CHECK=0` 试 |
-| 9 | **补跑 SWD `-v` 校验** | 唯一能证明"芯片里的镜像 == 仓库 `firmware/`"的证据。当前 SWD 链路不通（探针好、目标有电、固件未禁 SWD）→ 先查物理接线，见 §8.1② 的清单；接好后跑 `STM32_Programmer_CLI -c port=SWD -w <elf> -v -rst`，并与 `md5 419cd36b70aeaa897789151dda3b1500` 比对 |
+| 9 | ~~补跑 SWD `-v` 校验~~ | ✅ **已完成**（§8.1②）：改用**只读读回比对**（`objcopy` 出镜像 → `-u` 从芯片读回 → `cmp`），`37548` 字节零差异。中间一度连不上，根因是 `usbipd` 直通留下的残留状态，**拔插 USB 即恢复**；判据是 `--list` 读不到探针 FW |
 
 ---
 
@@ -302,40 +302,84 @@ RDK 上 **不是 git 仓库**（`~/rescue/` 无 `.git`），是**纯 rsync 部�
 → **两处修复的目标文件都晚于各自的源码，且 elf 链接在所有源码之后**，
 即这个镜像确实含修复 1（IMU 降级）与修复 2（RX 看门狗）。
 
-**留档**（供 SWD 恢复后比对）：`rescue_f103c8.elf`
+**留档**：`rescue_f103c8.elf`
 `md5 419cd36b70aeaa897789151dda3b1500`，`1049584` 字节，构建于 `2026-09-16 15:56:13`。
 
-#### ② 构建 ↔ 芯片 ⏸ **受阻：SWD 链路不通**
+#### ② 构建 ↔ 芯片 ✅ **已通过（字节级）**
 
-想用 `STM32_Programmer_CLI -w <elf> -v -rst` 做字节级校验，但**连不上目标**。
-已排除的全部软件侧可能：
+**方法：只读读回比对**（不写入、不复位），比 `-w ... -v` 更强——
+它证明的是"**芯片此刻就已经是**这份镜像"，而不是"写入后被写成了这份镜像"。
+
+```bash
+# 1) 把 ELF 转成 Flash 镜像（objcopy 按 LMA 排布，即烧录内容）
+arm-none-eabi-objcopy -O binary build/Debug/rescue_f103c8.elf fw_from_elf.bin   # 37548 字节
+# 2) 从芯片读回同长度（-u = upload，只读）
+STM32_Programmer_CLI -c port=SWD -u 0x08000000 37548 fw_from_chip.bin
+# 3) 逐字节比对
+cmp fw_from_elf.bin fw_from_chip.bin
+```
+
+| 项 | 值 |
+|---|---|
+| ELF 镜像 | `37548` 字节，`md5 d7645a16e6c6fd64277fdc3bc5a817da` |
+| 芯片读回 | `37548` 字节，`md5 d7645a16e6c6fd64277fdc3bc5a817da` |
+| `cmp` | ✅ **无任何差异** |
+
+> 37548 字节 ≈ 64K 的 57.3%，与编译日志 `FLASH 57.29%` 吻合，长度也对得上。
+
+**芯片信息**：`Device ID 0x410`（STM32F101/F102/F103 Medium-density）、
+`Revision ID Rev A`、`NVM size 128 KBytes`、`Cortex-M3`。
+
+> ⚠️ 注意 **芯片实际 NVM = 128 KB，而链接脚本 `STM32F103XX_FLASH.ld:59` 写的是
+> `LENGTH = 64K`**（STM32F103C8 标称 64K，但这批片子实测 128K）。
+> 当前固件只用了 57%，**没有触顶，无害**；但若将来固件涨到 64K 以上，
+> 会先撞链接脚本的墙而不是片子的墙 —— 届时改 `LENGTH` 即可。
+
+##### 曾一度连不上：原因是 usbipd 残留状态，不是接线
+
+第一次尝试时**全部失败**，一度误判为"物理接线问题"。实际根因是：
+本轮早些时候这块 ST-Link 被 `usbipd bind/attach` 直通给 WSL，
+`detach` 之后 Windows 侧留下了**残留设备状态**。
+
+**决定性判据**：`STM32_Programmer_CLI --list` 里**探针的 FW 版本是空的**，
+SN 退化成了 Windows 实例路径（`5&1F94C9DB&0&6`）。
+**读探针 FW 只需要 USB、完全不需要目标板** —— 它读不到，就说明
+**主机↔探针这一段坏了**，与 SWD 接线无关。
+而当时 `Get-PnpDevice` 显示 `Status OK`、`ProblemCode=0`、WinUSB 驱动正常、
+无进程占用、`usbipd list` 还显示 `Not shared` —— **这些"看起来正常"的指标全都无法证伪它**。
+
+**解决**：拔掉 ST-Link USB、等几秒重插，立刻恢复：
+
+| | 修复前 | 重插后 |
+|---|---|---|
+| `ST-LINK SN` | `5&1F94C9DB&0&6`（Windows 实例路径，假的） | `37FF71064E573436439E1943`（真实 SN） |
+| `ST-LINK FW` | **（空）** | `V2J37S7` |
+| `Access Port Number` | `0` | `1` |
+| 连接目标 | `DEV_CONNECT_ERR` | `Voltage 3.29V`、`Device ID 0x410` |
+
+> **教训（可复用的诊断法）**：
+> 1. **`--list` 的 `ST-LINK FW` 是否为空，是"主机↔探针"与"探针↔目标"的分界判据。**
+>    FW 读不出来 → 先查主机侧（重插换口、usbipd 残留、过滤驱动），**别去拆 SWD 线**；
+>    FW 读得出来但连不上目标 → 才轮到查接线（SWD 座 / 共地 / CLK-DIO 反接 / VTref / NRST）。
+> 2. **`Get-PnpDevice` 的 `Status OK` 不等于设备可用。** 设备能枚举、驱动正常、
+>    `ProblemCode=0`，工具照样可能一句话都跟它说不通 —— **要用"工具能不能读到它的 FW"来判**。
+> 3. **`usbipd` 的副作用会延续到 `detach` 之后。** 用过直通就**拔插一次**再做烧录，
+>    比逐个排查驱动栈快得多。
+
+##### 备查：当时排除过的项（供下次快速定位）
 
 | 排查项 | 证据 | 结论 |
 |---|---|---|
-| ST-Link 探针是否被 Windows 识别 | `Get-PnpDevice` → `5&1F94C9DB&0&6` **Status OK** | ✅ 正常 |
-| 驱动是否正确 | Service=`WinUSB`，Provider=STMicroelectronics，**ProblemCode=0**，无 Upper/Lower filter | ✅ 正常 |
-| 是否被进程占用 | `Get-Process` 无 `STM32/stlink/Cube/JLink/openocd` | ✅ 无占用 |
-| 是否被 usbipd 劫持 | `usbipd list` → **Not shared**；WSL `lsusb` 看不到它 | ✅ 未劫持 |
-| 探针固件是否活着 | `ST-LINK_gdbserver` **成功初始化探针**（不再报探针错） | ✅ 探针健康 |
-| 目标 MCU 是否有电 | RDK 3 秒收到 **400 字节**遥测（ODOM/TEL 正常刷） | ✅ 有电在跑 |
-| 固件是否禁用了 SWD | `stm32f1xx_hal_msp.c:79` 只有 `__HAL_AFIO_REMAP_SWJ_NOJTAG()` = **只关 JTAG、保留 SWD** | ✅ 未禁用 |
+| 是否被 usbipd 劫持 | `usbipd list` → **Not shared**；WSL `lsusb` 看不到它 | ⚠️ **显示正常但仍有残留状态**，不可作为判据 |
+| 驱动是否正确 | Service=`WinUSB`，Provider=STMicroelectronics，**ProblemCode=0** | 正常（但不足以说明能用） |
+| 探针固件是否活着 | `ST-LINK_gdbserver` 报 `Error in initializing ST-LINK device` | ⚠️ 当时被误读为"探针健康" |
+| 目标 MCU 是否有电 | RDK 3 秒收到 **400 字节**遥测（ODOM/TEL 正常刷） | ✅ 有电在跑（这条是真的，排除了供电） |
+| 固件是否禁用了 SWD | `stm32f1xx_hal_msp.c:79` 只有 `__HAL_AFIO_REMAP_SWJ_NOJTAG()` = **只关 JTAG、保留 SWD** | ✅ 未禁用（这条也是真的） |
 
-试过并**全部失败**的组合：`mode` = 默认 / `UR`（复位下）/ `hotplug`；
-频率含 `freq=100`；探针工具换用 `ST-LINK_gdbserver -m 0 / -m 1`。
-一律报 `ST-LINK error (DEV_CONNECT_ERR)` /
-`Failed to connect to device. Please check power and cabling to target.`
-
-→ **探针好、目标有电、固件没禁用 SWD，但 SWD 信号到不了 MCU ⟹ 纯物理接线问题。**
-
-**待查的物理清单**（按可能性排序）：
-1. **SWD 排线是否真的插到板子的 SWD 座上**（不只是插了 ST-Link 的 USB 端）；
-2. **GND 是否与机器人共地**（不共地则 SWD 必然失败，且现象与本次一致）；
-3. **SWCLK / SWDIO 是否接反**（克隆探针的 4 脚丝印顺序与板子常不一致，这是经典坑）；
-4. 探针的 **VTref / 3.3V 参考脚**是否接上（部分克隆探针要靠目标 3.3V 驱动电平转换）；
-5. `mode=UR` 额外需要 **NRST** 接线——本次只接了 4 线的话 UR 必然失败，属正常。
-
-> ⚠️ **不要用「能跑就行」放过这一项**：`-v` 是唯一能证明芯片里镜像与仓库一致的证据。
-> 本次行为侧只提供了**旁证**（见下），不能替代字节级校验。
+失败时试过的组合：`mode` = 默认 / `UR` / `hotplug`、`freq=100`、
+`ST-LINK_gdbserver -m 0 / -m 1` —— 一律 `DEV_CONNECT_ERR`。
+**这些全都改变不了"主机读不到探针 FW"这个事实，所以全都没用。**
+真正的物理接线问题其实**从未被证实**（重新插拔 USB 后一次就连上了）。
 
 #### ③ 行为侧旁证（非字节级，但方向一致）
 
@@ -354,8 +398,16 @@ RDK 上 **不是 git 仓库**（`~/rescue/` 无 `.git`），是**纯 rsync 部�
 → 546 次连续探测零长间隔，与"运行中的镜像已带 RX 看门狗"一致。
 **但这只是旁证**：它证明"没有出现旧固件的故障签名"，不等于"字节与仓库相同"。
 
-**结论**：上位机侧同步 ✅ 完成；固件侧"源↔构建"✅ 完成；
-"构建↔芯片"⏸ **待 SWD 接线修好后补跑 `-v` 校验**（记入 §5 待办）。
+> 注：本条旁证是在 ② 受阻期间做的"不空等"动作。之后 ② 做成了**字节级**校验并**完全通过**，
+> 所以本条的定位从"主要证据"降为"**独立第二来源**"——它从**行为**上佐证，
+> 与 ② 从**字节**上证明，两条互相独立且结论一致，比任何单一条都更稳。
+> 这类"一个结论用两条不相干的路径各验一次"的做法值得保留。
+
+**结论**：上位机侧同步 ✅ 完成（§8 全量 md5 清单 diff，非协作产物零差异）；
+固件侧"源↔构建"✅ 完成（§8.1① 28/28 逐字节一致）；
+"构建↔芯片"✅ **完成**（§8.1② 只读读回比对，`37548` 字节 `cmp` 无差异）。
+
+**即：仓库、RDK、MCU 三者现在是一致的。**
 
 ### 8.2 同步过程中的一次操作失误（留档，避免重犯）
 
