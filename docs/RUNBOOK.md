@@ -675,6 +675,27 @@ PYTHONPATH=src python3 tools/hw_selftest.py --duration 5       # 遥测/速度�
 | 10c | **套取开口 `SLEEVE_OPENING_MM`** | YAML `placement.sleeve_opening_mm`（当前 `[150,100]`） | ✅ 已按 STL 实测填入（`tools/stl_gripper_probe.py`） | 机构再改时重跑探测脚本；它决定 10b 的上限 |
 | 11 | **50Hz 帧预算** | 本文 §3.2 | **全部为静态估算，未实测** | §3.4 的三个数 |
 | 12 | **整机重量/尺寸** | 硬件 | ≤1.5kg / ≤300×300mm / 高≤200mm（`README.md:74-82`） | 称重量尺 |
+| 13 | **开赛时目标到底"集中在正中"还是"散布全场"** | 无需改代码（两种都已兜住） | 赛规**自相矛盾**：图7 画的是集中在正中，文字说"位置可随机"，图号还串到了别的赛道 | 现场问裁判 / 看第一次摆位。**确认后可按 `docs/SEARCH_STRATEGY.md` §9 进一步优化**（集中→砍掉扫场；散布→保持现状） |
+
+---
+
+## 附录 B：文档索引（哪份该看哪份）
+
+| 文档 | 什么时候看 |
+|---|---|
+| `docs/RUNBOOK.md`（本文） | 部署、启动、现场排障、赛前检查 |
+| `docs/SEARCH_STRATEGY.md` | **搜索算法**：赛规依据、车道参数推导、残余盲区、**仿真保真度缺口** |
+| `docs/GRIPPER_V2_GEOMETRY.md` | 夹爪 V2 几何、套取参数标定 |
+| `docs/HW_SELFTEST.md` | 硬件自检怎么用 |
+| `docs/audit/FULL_PROBLEM_LIST.md` | 全部已知问题清单与状态 |
+| `docs/audit/REAL_MACHINE_DEBUG_20260916.md` | 首次真机联调排查全记录（含固件两处"变砖级"修复） |
+| `docs/audit/GOAL_ANALYSIS.md` | 目标/规则层分析 |
+
+> ⚠️ **一条容易误信的事**：`tools/fix_verifiers/snapshot_sim.py` 的仿真基线
+> （80/80/80/85/80）**不覆盖搜索/探索路径** —— 实测整场 9000 帧里
+> `_get_explore_target()` 调用 **0 次**（仿真把目标散布在环带里，相机总有目标可看）。
+> 所以**搜索相关的改动用 `verify_search_coverage.py` 验证，不要引用仿真基线**。
+> 详见 `docs/SEARCH_STRATEGY.md` §7。
 
 ---
 

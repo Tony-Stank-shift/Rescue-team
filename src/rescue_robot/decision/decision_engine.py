@@ -43,7 +43,12 @@ class FallbackLevel:
     SURVIVAL = 4      # 保命绕圈
 from ..perception.target_types import TargetType, TargetInfo, get_point_value
 from ..perception.world_map import WorldMap, TrackedTarget, TargetStatus
-from ..perception.field_elements import SafeZoneColor, FieldLayout
+from ..perception.field_elements import SafeZoneColor, FieldLayout, FIELD_SIZE
+
+#: 场地中心（mm）—— "中央优先"搜索段以此为基准。
+#: 赛规第 18 页：「转运至安全区的无效救援目标将被取出重新随机放置在**场地中央**」。
+FIELD_CENTER_X = FIELD_SIZE / 2.0
+FIELD_CENTER_Y = FIELD_SIZE / 2.0
 
 logger = logging.getLogger("decision_engine")
 
@@ -117,6 +122,47 @@ class DecisionEngine:
     EXPLORE_HOLD_S = 8.0
     TRANSPORT_TIMEOUT_S = 15.0   # 运送超时
 
+    # ---- 搜索计划（中央优先 → 全场蛇形覆盖）--------------------------------
+    # 背景：赛规第 18 页明确「转运至安全区的**无效**救援目标将被取出**重新随机
+    # 放置在场地中央**」，而第 16 页的现场布置图（图7）画的正是 20 个目标
+    # **紧凑堆在场地正中**（约 240×160mm，物体之间紧挨着）。
+    # 同页文字又说「各种目标摆放位置及姿态**可随机**」—— 两种说法并存。
+    #
+    # 因此采用**两种假设都成立**的两段式：
+    #   ① 中央优先：先朝场心方向靠近、停在 standoff 处"看"一眼中央有没有货；
+    #   ② 全场蛇形：没看到就按固定车道扫全场，保证覆盖，不会因为"其实散着放"
+    #      而永远找不到。
+    #
+    # ⚠️ 为什么不能直接导航到 (1500,1500)：按图7 的摆法，场心是**一坨紧挨的物体**，
+    #    开过去就是从物体上碾过去。所以中央那一段必须**留停顿距离**。
+    #: 中央优先段的停顿距离（mm）：停在距场心这么远的地方观察，不压上物体堆。
+    #: 取 600mm 的依据：40mm 物体在 600mm 处成像约 719px²，远高于
+    #: detection.py 的 `_min_contour_area = 200px²` 门限。
+    EXPLORE_CENTER_STANDOFF_MM = 600.0
+    #: 车道距场心的**最小纵向距离**（mm）。车道的 y 必须落在
+    #: `[场心-此值, 场心+此值]` **之外**，否则车会从中央的物体堆上碾过去。
+    #: 取 500mm：物体堆半径约 120mm（图7 量得 240×160mm）+ 车半对角线 212mm
+    #: ⇒ 至少需要 ~332mm，500mm 留了余量。
+    EXPLORE_CENTER_KEEPOUT_MM = 500.0
+    #: 车道单侧**可靠探测半宽**（mm）。相机朝前看，目标要同时满足两条约束：
+    #:   ① 在水平 FOV 内： Δx > Δy / tan(38.5°) = 1.258·Δy
+    #:   ② 成像面积 > 门限： Δx² + Δy² < (40·f/√200)² = 1138²  （f=402.3px）
+    #: 联立解得 Δy < 708mm。这里取 500mm 再留一档余量（对应约 400px²，
+    #: 即 2× 最小面积门限），宁可多跑一条车道也不要"扫过却没看见"。
+    EXPLORE_LANE_HALF_BAND_MM = 500.0
+    #: 最靠边的车道到墙的距离（mm）：既要压住安全区（y<330 / y>2670）不让车
+    #: 蹭进去（进对方安全区直接判本轮结束），又要让车道边缘的探测带够到场地边。
+    #: 550mm = 安全区高 300 + 车半宽 150 + 余量 100。
+    EXPLORE_LANE_EDGE_MM = 550.0
+    #: 车道两端的 x 余量（mm）：车宽 ≤300mm，留 300mm 不贴墙。
+    EXPLORE_X_MARGIN_MM = 300.0
+    #: 沿车道每走这么远设一个路点（mm）。设点是为了"被目标打断后还能续扫"。
+    EXPLORE_WP_STEP_MM = 750.0
+    #: 判定"已到达路点"的距离（mm）。
+    EXPLORE_ARRIVE_MM = 250.0
+    #: 单个路点的最长停留（秒）：到不了就跳过，避免死磕一个点。
+    EXPLORE_WP_TIMEOUT_S = 25.0
+
     def __init__(self,
                  world_map: WorldMap,
                  my_color: SafeZoneColor = SafeZoneColor.RED):
@@ -173,10 +219,14 @@ class DecisionEngine:
         self._nav_move_accum: float = 0.0
         self._abandoned_ids: set = set()
         self._abandon_until: float = 0.0
-        # 探索点缓存：`_get_explore_target()` 每次调用都是**随机点**，
-        # 若每帧都重新取，导航目标会每帧跳变 → 车原地抖动、永远走不到。
+        # 探索点缓存：`_get_explore_target()` 现在按**搜索计划**给点，
+        # 而计划是确定性的、逐点消费；缓存只负责"同一路点不要每帧跳变"。
         self._explore_target: Optional[tuple] = None
         self._explore_until: float = 0.0
+        # 搜索计划（中央优先 → 全场蛇形）；None 表示还没构建（惰性，需要当前位姿）
+        self._search_plan: Optional[list] = None
+        self._search_wp_since: float = 0.0
+        self._search_plan_exhausted: bool = False
 
         logger.info(f"DecisionEngine 初始化: my_color={my_color.name}")
 
@@ -220,6 +270,9 @@ class DecisionEngine:
         self._abandon_until = 0.0
         self._explore_target = None
         self._explore_until = 0.0
+        self._search_plan = None             # 搜索计划（惰性构建）
+        self._search_wp_since = 0.0          # 当前路点的起始时刻（超时跳点用）
+        self._search_plan_exhausted = False  # 计划走完 → 退回随机兜底
         logger.info("🏁 比赛开始! 状态=FIRST_TRIP")
 
     # ---- 主决策循环 ----
@@ -608,6 +661,9 @@ class DecisionEngine:
         #    会让本趟永远送不到（见 _check_invalid_transport 的说明）。
         if not grip_done and self._check_invalid_transport(rx, ry):
             self._current_target = None  # 重新选择目标
+            # 被判无效的目标已被裁判取出**重放场地中央**（赛规第 18 页）→
+            # 把"中央查看"重新插到搜索计划队首，下一趟先看正中。
+            self._rearm_center_check(rx, ry)
 
         # 选择目标（伤员单独转运；普通+核心可混合 ≤3）
         if self._current_target is None:
@@ -821,33 +877,179 @@ class DecisionEngine:
                                timestamp: float = None) -> tuple:
         """返回一个**在一段时间内保持不变**的探索点。
 
-        为什么需要：`_get_explore_target()` 内部是 `random.randint`，每调一次就变一个点。
-        决策层是 50Hz 调用的 → 若每帧都取新点，导航目标每帧跳变，车会在原地抖动、
-        永远走不到任何地方（与"保活链被逐帧覆盖"是同一类问题，见 T1-10）。
+        为什么需要：决策层是 50Hz 调用的 → 若每帧都取新点，导航目标每帧跳变，
+        车会在原地抖动、永远走不到任何地方（与"保活链被逐帧覆盖"是同一类问题，
+        见 T1-10）。
+
+        ⚠️ 到达阈值必须与搜索计划的消费阈值 :data:`EXPLORE_ARRIVE_MM` 一致：
+        旧值是 150mm。若这里仍用 150 而计划按 250mm 消费，车到点后要**干等最多
+        `EXPLORE_HOLD_S`=8s** 才换下一个路点 —— 蛇形计划有十几个路点，
+        光干等就浪费两分钟。所以统一用 EXPLORE_ARRIVE_MM。
         """
         if timestamp is None:
             timestamp = time.time()
         near = (self._explore_target is not None and
                 math.hypot(self._explore_target[0] - rx,
-                           self._explore_target[1] - ry) < 150.0)
+                           self._explore_target[1] - ry) < self.EXPLORE_ARRIVE_MM)
         if (self._explore_target is None or near
                 or timestamp >= self._explore_until):
             self._explore_target = self._get_explore_target(rx, ry)
             self._explore_until = timestamp + self.EXPLORE_HOLD_S
         return self._explore_target
 
+    # ---- 搜索计划（中央优先 → 全场蛇形覆盖）----
+
+    def _build_search_plan(self, rx: float, ry: float) -> list:
+        """构建有序搜索计划：**中央优先** + **全场蛇形兜底**。
+
+        为什么是两段式：赛规同时存在两种说法 ——
+        布置图（图7）显示 20 个目标紧凑堆在场地正中；同页文字又说"摆放位置可随机"。
+        两段式让**两种假设都成立**：
+          · 目标真在正中 → 第 1 个路点就看见了，几乎不浪费时间；
+          · 目标其实散着放 → 后续蛇形车道保证全场覆盖，不会永远找不到。
+
+        为什么中央那一段要留停顿距离：按图7 的摆法场心是一坨**紧挨着**的物体，
+        直接导航到 (1500,1500) 等于从物体上碾过去（还会撞飞几个）。
+        所以中央段停在 :data:`EXPLORE_CENTER_STANDOFF_MM` 处"看"。
+
+        车道参数见类常量；车道间距按"相机可靠探测距离 ≈1100mm、
+        该处横向半宽 875mm"反推，保证相邻车道无盲带。
+        """
+        plan: list = []
+
+        # ── 第 1 段：中央优先 ──
+        # 从**机器人当前所在的一侧**朝场心靠近，停在 standoff 处；
+        # 这样整段行进过程中相机始终朝着场心，能提前看到中央的物体堆。
+        dx, dy = FIELD_CENTER_X - rx, FIELD_CENTER_Y - ry
+        dist = math.hypot(dx, dy)
+        if dist > self.EXPLORE_CENTER_STANDOFF_MM + 50.0:
+            k = (dist - self.EXPLORE_CENTER_STANDOFF_MM) / dist
+            wp = (rx + dx * k, ry + dy * k)
+            if not self._is_in_any_safe_zone(*wp):
+                plan.append(wp)
+
+        # ── 第 2 段：全场蛇形 ──
+        # 车道必须**同时**满足两条硬约束，否则会踩坑：
+        #   ① 不能经过场心附近 → 不然会从中央的物体堆上碾过去（图7 的摆法）；
+        #   ② 相邻车道间距不能超过 2×单侧探测半宽 → 不然中间有盲带。
+        # 这两条把车道挤成了"上下各一组"：场心 ±KEEPOUT 之外，各自铺满。
+        lo, hi = self.EXPLORE_LANE_EDGE_MM, FIELD_SIZE - self.EXPLORE_LANE_EDGE_MM
+        mid_lo = FIELD_CENTER_Y - self.EXPLORE_CENTER_KEEPOUT_MM
+        mid_hi = FIELD_CENTER_Y + self.EXPLORE_CENTER_KEEPOUT_MM
+        lanes = (self._spread(lo, mid_lo) + self._spread(mid_hi, hi))
+
+        x0 = self.EXPLORE_X_MARGIN_MM
+        x1 = FIELD_SIZE - self.EXPLORE_X_MARGIN_MM
+        for i, ly in enumerate(lanes):
+            xs = []
+            x = x0
+            while x <= x1 + 1e-6:
+                xs.append(x)
+                x += self.EXPLORE_WP_STEP_MM
+            if xs and xs[-1] < x1 - 1e-6:
+                xs.append(x1)
+            if i % 2 == 1:          # 蛇形：奇数车道反向，减少来回横穿
+                xs.reverse()
+            for lx in xs:
+                if not self._is_in_any_safe_zone(lx, ly):
+                    plan.append((lx, ly))
+        return plan
+
+    @classmethod
+    def _spread(cls, a: float, b: float) -> list:
+        """在 [a, b] 上均匀铺若干条车道，间距不超过 2×单侧探测半宽。
+
+        车道数取 ``max(2, ceil((b-a)/间距)+1)``：至少两条（保证这一段有覆盖），
+        且均匀分布 —— 均匀比"从一端按固定步长铺到底"更不容易在末端留出盲带。
+        """
+        step = 2.0 * cls.EXPLORE_LANE_HALF_BAND_MM
+        if b < a:
+            return []
+        n = max(2, int(math.ceil((b - a) / step)) + 1)
+        if n == 2:
+            return [a, b]
+        return [a + (b - a) * k / (n - 1) for k in range(n)]
+
+    def _rearm_center_check(self, rx: float, ry: float) -> None:
+        """把"中央优先"那一段重新插到计划最前面。
+
+        触发时机：本队投放被判无效（目标被裁判取出**重放场地中央**，见赛规第 18 页）。
+        这时新目标就出现在正中，值得再看一眼 —— 但**只做这一次近场观察**，
+        已经扫过的蛇形车道不会被重置，避免每趟都重扫全场。
+        """
+        if self._search_plan is None:
+            self._search_plan = self._build_search_plan(rx, ry)
+        dx, dy = FIELD_CENTER_X - rx, FIELD_CENTER_Y - ry
+        dist = math.hypot(dx, dy)
+        wp = None
+        if dist > self.EXPLORE_CENTER_STANDOFF_MM + 50.0:
+            k = (dist - self.EXPLORE_CENTER_STANDOFF_MM) / dist
+            cand = (rx + dx * k, ry + dy * k)
+            if not self._is_in_any_safe_zone(*cand):
+                wp = cand
+        if wp is None:
+            return
+        # 若队首已经是同一个中央点就不重复插
+        if self._search_plan and math.hypot(self._search_plan[0][0] - wp[0],
+                                            self._search_plan[0][1] - wp[1]) < 1.0:
+            return
+        self._search_plan.insert(0, wp)
+        self._search_wp_since = time.time()
+        self._explore_target = None      # 让缓存立刻改用新队首
+        logger.info(f"搜索计划：被判无效的投放 → 重新把『中央查看』插到队首 {wp}")
+
+    def _next_search_waypoint(self, rx: float, ry: float) -> Optional[tuple]:
+        """取搜索计划的下一个路点；已到达/超时的路点会被消费掉。"""
+        if self._search_plan_exhausted:
+            return None
+        if self._search_plan is None:
+            self._search_plan = self._build_search_plan(rx, ry)
+            self._search_wp_since = time.time()
+            logger.info(f"搜索计划已生成：中央优先 + 全场蛇形，共 "
+                        f"{len(self._search_plan)} 个路点")
+        now = time.time()
+        while self._search_plan:
+            wp = self._search_plan[0]
+            d = math.hypot(wp[0] - rx, wp[1] - ry)
+            if d <= self.EXPLORE_ARRIVE_MM:
+                self._search_plan.pop(0)
+                self._search_wp_since = now
+                continue
+            if now - self._search_wp_since > self.EXPLORE_WP_TIMEOUT_S:
+                logger.warning(f"搜索路点 ({wp[0]:.0f},{wp[1]:.0f}) 超时未达"
+                               f"（{self.EXPLORE_WP_TIMEOUT_S:.0f}s）→ 跳到下一个")
+                self._search_plan.pop(0)
+                self._search_wp_since = now
+                continue
+            return wp
+        self._search_plan_exhausted = True
+        logger.warning("搜索计划已走完（全场蛇形覆盖完毕）→ 退回随机探索兜底")
+        return None
+
     def _get_explore_target(self, rx: float, ry: float) -> tuple:
-        """生成探索目标：场地中央 + 随机偏移（排除安全区内的点）。"""
-        for _ in range(6):
-            cx = 1500 + random.randint(-600, 600)
-            cy = 1500 + random.randint(-600, 600)
-            cx = max(200, min(2800, cx))
-            # 旧实现这里被二次 clamp 到 2200，导致 y>2200 一侧（1/2 号出发区那半场）
-            # 永远搜不到 —— 上安全区附近的目标要等很久才可能被发现。
-            cy = max(200, min(2800, cy))
+        """给出探索目标：**优先走搜索计划**，计划走完才退回随机点。
+
+        旧实现是"在 [900,2100]² 里纯随机取点"：没有记忆、没有覆盖保证，
+        会反复走同一片区域；而且随机范围实际只覆盖场地中央 16%，
+        外层 900mm 的环带**永远搜不到**（那个 `clamp(200,2800)` 根本没生效）。
+        现在改为确定性计划：中央先看一眼，然后按车道蛇形扫全场，不重复。
+        """
+        wp = self._next_search_waypoint(rx, ry)
+        if wp is not None:
+            return wp
+
+        # ── 兜底：计划走完后的随机点（保证任何情况下都不会"无处可去"）──
+        # ⚠️ 旧兜底是 `1500 ± 600`，即只在 [900,2100]² 里抽 —— 场地**外圈 900mm
+        # 的环带永远抽不到**，这正是当初"y>2200 那半场搜不到"那个 bug 的另一半
+        # （注释里说修过，但真正生效的是 `clamp(200,2800)`，而随机范围本身根本没到）。
+        # 现在改成**在整个场地内**抽点，外圈也能被覆盖到。
+        x0, x1 = self.EXPLORE_X_MARGIN_MM, FIELD_SIZE - self.EXPLORE_X_MARGIN_MM
+        for _ in range(12):
+            cx = random.uniform(x0, x1)
+            cy = random.uniform(x0, x1)
             if not self._is_in_any_safe_zone(cx, cy):
                 return (cx, cy)
-        return (1500.0, 1500.0)
+        return (FIELD_CENTER_X, FIELD_CENTER_Y)
 
     def _is_in_any_safe_zone(self, x: float, y: float) -> bool:
         """(x, y) 是否落在任一安全区内（世界地图持有场地布局）。"""

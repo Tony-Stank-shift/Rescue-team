@@ -103,14 +103,49 @@ rep3 = e._anomaly._report(AnomalyType.SENSOR_FAULT_CAMERA, "摄像头无数据",
 a3 = e._handle_anomaly(rep3, (300.0, 300.0, 0.0))
 chk("传感器降级 → NAVIGATE_TO 而非 WAIT(静止)", a3.type == ActionType.NAVIGATE_TO, a3.type.name)
 
-print("E) 探索点覆盖全场（旧实现 y 上限 2200）:")
-seen_hi = False
-import random as _r
-_r.seed(0)
-for _ in range(300):
-    p = e._get_explore_target(1500, 1500)
-    if p[1] > 2300: seen_hi = True; break
-chk("探索点覆盖 y 上限提升到 2800 且排除安全区", max(e._get_explore_target(1500,1500)[1] for _ in range(400)) > 2000)
+print("E) 探索覆盖全场（旧实现 y 上限 2200 → 半场永远搜不到）:")
+# 旧实现是"在 [900,2100]² 里纯随机取点"：外层 900mm 环带永远搜不到，
+# 而且 y>2200 那半场（1/2 号出发区一侧）根本进不去。
+# 现在改为**确定性搜索计划**：中央优先 + 全场蛇形车道。
+# 断言比原来更强 —— 不再靠"采样随机点看 y 能到多大"，而是直接验证计划本身：
+#   ① 覆盖：车道探测带并集在场地内部**无盲带**
+#   ② 不分半场：上下两半都有车道（这正是旧 bug 的回归护栏）
+#   ③ 安全：不落在安全区，且**行进路径**不穿过场心（中央可能有图7 那堆物体）
+import math as _m
+from rescue_robot.decision.decision_engine import (
+    FIELD_CENTER_X as _CX, FIELD_CENTER_Y as _CY, FIELD_SIZE as _FS,
+)
+
+e._search_plan = None; e._search_plan_exhausted = False
+plan = e._build_search_plan(200.0, 200.0)
+ys = sorted({p[1] for p in plan})
+HB, KO = e.EXPLORE_LANE_HALF_BAND_MM, e.EXPLORE_CENTER_KEEPOUT_MM
+
+chk("车道覆盖上下两个半场（旧 bug：y>2200 那半场永远搜不到）",
+    min(ys) < _CY and max(ys) > _CY, f"车道 y = {[round(v) for v in ys]}")
+
+_gaps = [gy for gy in range(50, _FS - 50 + 1, 25)
+         if not any(abs(gy - ly) <= HB for ly in ys)]
+chk("车道探测带并集无盲带（单侧半宽 %.0fmm）" % HB, not _gaps, f"盲带 y={_gaps}")
+
+chk("搜索路点不落在任何安全区内",
+    not [p for p in plan if e._is_in_any_safe_zone(*p)])
+
+_worst = 1e9
+for (ax, ay), (bx, by) in zip(plan, plan[1:]):
+    _dx, _dy = bx - ax, by - ay
+    _l2 = _dx * _dx + _dy * _dy
+    _t = 0.0 if _l2 == 0 else max(0.0, min(1.0, ((_CX - ax) * _dx + (_CY - ay) * _dy) / _l2))
+    _worst = min(_worst, _m.hypot(ax + _t * _dx - _CX, ay + _t * _dy - _CY))
+chk("搜索行进路径不穿越场心禁入区（不碾中央物体堆）",
+    _worst >= KO, f"最近 {_worst:.0f}mm ≥ {KO:.0f}mm")
+
+_plan2 = e._build_search_plan(2850.0, 150.0)
+_d0 = _m.hypot(_plan2[0][0] - _CX, _plan2[0][1] - _CY)
+chk("中央优先段停在 standoff 处（看得见场心、不压物体）",
+    abs(_d0 - e.EXPLORE_CENTER_STANDOFF_MM) < 1.0, f"首点距场心 {_d0:.0f}mm")
+chk("搜索计划确定且有限（不重复、不空）",
+    len(_plan2) > 0 and len(_plan2) == len(set(_plan2)), f"{len(_plan2)} 个路点")
 
 print(f"\nP1-8 结果: {sum(ok)}/{len(ok)} 通过")
 assert all(ok), "P1-8 未全部通过"

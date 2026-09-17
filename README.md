@@ -29,6 +29,9 @@
 
 > **完整现场手册见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)** —— 含赛前检查表、上电顺序、
 > 启动链路、故障应急手册。本节只讲怎么把程序跑起来。
+>
+> 其它文档：[`docs/SEARCH_STRATEGY.md`](docs/SEARCH_STRATEGY.md)（搜索算法与赛规依据）、
+> [`docs/GRIPPER_V2_GEOMETRY.md`](docs/GRIPPER_V2_GEOMETRY.md)（夹爪 V2 与套取标定）。
 
 **一条命令启动**（在 RDK X5 上，只需说清两件事：出发区号、本队安全区颜色）：
 
