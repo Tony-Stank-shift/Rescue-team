@@ -149,6 +149,66 @@ class Placement:
     # 升力来源；0 还是 4 哪个更稳属真机标定项（见 docs/GRIPPER_V2_GEOMETRY.md）。
     PROGRESSIVE_RAISE_STEPS: int = 4
 
+    # ── 套取开口的**矩形判据**（2026-09-17 真机踩到后补实现）──────────────
+    # ⚠️ 事实核查：`SLEEVE_OPENING_MM` 此前**从未被任何逻辑使用** ——
+    #    配置与注释都写着"捕获判据必须用它 / 现已按矩形开口复核"，但全仓库
+    #    只有 `CAPTURE_RADIUS_MM` 一个**圆**判据，矩形复核从来没写。
+    #    （同类问题：搜索那边的 `clamp(200,2800)` 也是"注释声称修了、实际没生效"。）
+    # 真机后果（4 号区，物体按赛规图7 集中在场心）：圆判据允许"目标在圆内但不在
+    #    开口下方"，车心压到物体上时也算到位 → **整车压过物体堆**。
+    #
+    # 开口几何：框心在车心**前方 L=DROP_FORWARD_MM**，开口 150(横向)×100(前后)
+    #   ⇒ 目标在**车体系**里必须满足  前后 ∈ [L-50, L+50] = [20,120]mm 且 |横向| ≤ 75mm。
+    @staticmethod
+    def object_in_sleeve(rx: float, ry: float, rtheta: float,
+                         tx: float, ty: float) -> bool:
+        """目标是否落在套取框开口**矩形**内（"罩得住"的充要几何判据）。
+
+        Args:
+            rx, ry, rtheta: 车心与车头朝向（rad，场地系，逆时针为正）
+            tx, ty: 目标场地坐标
+
+        判据（车体系）：前后 ∈ [L−深/2, L+深/2]，|横向| ≤ 宽/2。
+        """
+        import math as _m
+        L = float(Placement.DROP_FORWARD_MM)
+        try:
+            half_w = float(Placement.SLEEVE_OPENING_MM[0]) / 2.0
+            half_d = float(Placement.SLEEVE_OPENING_MM[1]) / 2.0
+        except Exception:
+            half_w, half_d = 75.0, 50.0
+        dx, dy = tx - rx, ty - ry
+        c, s = _m.cos(rtheta), _m.sin(rtheta)
+        fwd = dx * c + dy * s          # 车体系：前向
+        lat = -dx * s + dy * c         # 车体系：左向
+        return (L - half_d) <= fwd <= (L + half_d) and abs(lat) <= half_w
+
+    @staticmethod
+    def should_stop_for_capture(rx: float, ry: float, rtheta: float,
+                                tx: float, ty: float) -> bool:
+        """是否该**停止接近、开始套取**。
+
+        与 :meth:`object_in_sleeve` 的区别：这是**触发闸门**，要求目标已经进到
+        开口中心附近（前后 ≤ L）而不是刚碰到开口外沿（前后 ≤ L+深/2）。
+        否则会在开口最外沿（前后 ≈120mm）就停下 —— 目标只压在框的前唇上，
+        等于没罩住。横向仍要求对齐，避免"目标在侧边却开套"。
+        """
+        import math as _m
+        L = float(Placement.DROP_FORWARD_MM)
+        try:
+            half_w = float(Placement.SLEEVE_OPENING_MM[0]) / 2.0
+            half_d = float(Placement.SLEEVE_OPENING_MM[1]) / 2.0
+        except Exception:
+            half_w, half_d = 75.0, 50.0
+        dx, dy = tx - rx, ty - ry
+        c, s = _m.cos(rtheta), _m.sin(rtheta)
+        fwd = dx * c + dy * s
+        lat = -dx * s + dy * c
+        # 上界 L：一进到框心就别再往前开（再开会把目标推过开口）。
+        # 下界 −半深：车已经整体开过头（目标跑到车后）时不触发，
+        #   否则会"停在已经压过物体的位置"上白套一次，且与复核判据互相打架。
+        return (-half_d) <= fwd <= L and abs(lat) <= half_w
+
 
 placement = Placement()
 

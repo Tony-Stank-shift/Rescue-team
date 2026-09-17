@@ -111,6 +111,19 @@ class MotionController:
     # 到达判定阈值
     POSITION_TOLERANCE_MM = 40.0        # 位置容差（略大于网格分辨率）
     ANGLE_TOLERANCE_RAD = 0.15          # 角度容差 (~9°)，容忍网格离散误差
+
+    # ── 2026-09-17 真机新增：解决"只在原地转、永远差最后 10cm" ──
+    #: 超过这个角度误差才允许"原地转正"（不前进）。低于它一律保留前进分量
+    #: （走弧线靠近），避免 `linear` 被角度项压成 0 而卡死。
+    PIVOT_ONLY_RAD = math.radians(90.0)
+    #: 弧线靠近时前进速度的最小比例（相对 PID 输出）。
+    MIN_APPROACH_RATIO = 0.25
+    #: 近距爬行段：距离小于此值时不再要求"先对准"（近距方位角不可靠）。
+    CRAWL_RANGE_MM = 150.0
+    #: 爬行速度上限 / 下限（mm/s）与比例增益（1/s）：v = clamp(gain·distance, min, max)。
+    CRAWL_SPEED_MM_S = 120.0
+    CRAWL_MIN_MM_S = 30.0
+    CRAWL_GAIN = 1.0
     VELOCITY_ZERO_THRESHOLD = 10.0      # 静止判定速度 (mm/s)
 
     # 越障参数
@@ -218,11 +231,40 @@ class MotionController:
             self._pid_angle.reset()
             return VelocityCommand(linear=0.0, angular=0.0, timestamp=time.time())
 
+        # ── 近距爬行段（普通到点，align_heading=None）──────────────────────
+        # ⚠️ 2026-09-17 真机踩到：40~150mm 这段原本也走"先对准再前进"，但**近距时
+        #    方位角在数学上就不稳定**：目标位置抖动 δ 时方位角抖动 ≈ atan(δ/距离)，
+        #    δ=50mm、距离=100mm → 抖动 27° > 25.8° 阈值 ⇒ linear 恒为 0，
+        #    **最后 10cm 永远进不去**。而套住物体恰恰必须走完这 10cm。
+        #    现在：近距不再要求朝向，只要求接近（带角度阻尼慢速爬行），
+        #    "到位"仍由 POSITION_TOLERANCE_MM 判。罩住物体靠位置，不靠车头角度。
+        #    注意 align_heading 非空（投放对准）时不走这条 —— 投放落点依赖朝向。
+        if align_heading is None and distance < self.CRAWL_RANGE_MM:
+            v = min(self.CRAWL_SPEED_MM_S, max(self.CRAWL_MIN_MM_S,
+                                              self.CRAWL_GAIN * distance))
+            ang = self._pid_angle.compute(angle_error, 0.0, dt)
+            # 近距把角速度限一半：避免贴着物体时甩头把它蹭飞
+            ang = max(-self._max_w * 0.5, min(self._max_w * 0.5, ang))
+            self._current_command = VelocityCommand(
+                linear=v, angular=ang, timestamp=time.time())
+            return self._current_command
+
         # 连续过渡：角度误差大时减速+转向，小时全速前进
         angle_ratio = min(1.0, abs(angle_error) / (self.ANGLE_TOLERANCE_RAD * 3))
         linear = self._pid_distance.compute(0.0, -distance, dt)
-        linear = max(0, linear)  # 前进（不倒车）
-        linear *= (1.0 - angle_ratio)  # 角度越大速度越低
+        linear = max(0, linear)
+        # ⚠️ 2026-09-17 真机踩到：`linear *= (1 - angle_ratio)` 在角度误差 ≥ 25.8°
+        #    时把前进速度**压成 0** → 车只原地转、位置不变 → 位置看门狗 10s 后判"卡死"
+        #    并抢走导航目标 → 车被支使去别处，物体出视野。现场现象就是
+        #    "识别到物体却不去套，反而开走，然后说目标没了"。
+        #    现在分两档：
+        #      · 角度误差 ≤ PIVOT_ONLY_RAD（90°）：保留速度下限，**走弧线**靠近；
+        #      · 角度误差 > 90°：朝向差太多，先原地转正再走（此时不前进是合理的）；
+        #      · 需要指定朝向的场合（投放对准，align_heading 非空）保持旧行为。
+        if align_heading is not None or abs(angle_error) > self.PIVOT_ONLY_RAD:
+            linear *= (1.0 - angle_ratio)
+        else:
+            linear *= max(self.MIN_APPROACH_RATIO, 1.0 - angle_ratio)
         angular = self._pid_angle.compute(angle_error, 0.0, dt)
 
         # 限幅

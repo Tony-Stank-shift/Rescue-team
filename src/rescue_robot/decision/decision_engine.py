@@ -273,6 +273,23 @@ class DecisionEngine:
         self._search_plan = None             # 搜索计划（惰性构建）
         self._search_wp_since = 0.0          # 当前路点的起始时刻（超时跳点用）
         self._search_plan_exhausted = False  # 计划走完 → 退回随机兜底
+
+        # ⚠️ **必须复位空闲计时器**（2026-09-17 真机实测踩到）：
+        # 这两个计时器是在 `__init__`（= 程序启动那一刻）起的，而 `start_match()`
+        # 发生在**进 AUTONOMOUS 之后** —— 中间隔着整段 DEBUG 待机 + **1.5m 开场退避**。
+        # 退避是真实运动，但它不是决策引擎发的指令，所以计时器不知道。
+        # 实测日志（4 号区）：
+        #     09:12:28 程序启动（计时器起）
+        #     09:12:41~46 开场退避，车真的走了 1.5m
+        #     09:12:47 进 AUTONOMOUS → idle=18.4s → 异常[NO_ACTION_15S]
+        #              → 恢复动作 EMERGENCY_STOP（一开局就急停，且连报 4 帧）
+        # 现在：进比赛先把两个计时器都归零，让"无动作"从**开赛那一刻**算起。
+        _now = time.time()
+        self._last_action_time = _now
+        try:
+            self._anomaly.notify_action()
+        except Exception:
+            pass
         logger.info("🏁 比赛开始! 状态=FIRST_TRIP")
 
     # ---- 主决策循环 ----
@@ -505,7 +522,7 @@ class DecisionEngine:
                                           release_done, release_valid,
                                           delivered_ids)
         elif self._strategy_state == StrategyState.FORCED_RESET:
-            return self._handle_forced_reset()
+            return self._handle_forced_reset(rx, ry)
         elif self._strategy_state == StrategyState.DONE:
             return Action(type=ActionType.WAIT, detail="比赛完成")
         else:
@@ -553,7 +570,10 @@ class DecisionEngine:
 
         # 导航到目标（仅未夹取阶段需要到达目标）
         if not grip_done:
-            if not nav_arrived:
+            # ⚠️ "到位"的判据必须看**套取框**，不能只看车心（`nav_arrived` = 车心
+            #    距目标 <40mm）。车心压到目标上时，目标其实落在开口**后方** 70mm ⇒
+            #    整车压过去（现场现象："物体堆卡在车下"）。见 `Placement.object_in_sleeve`。
+            if not (nav_arrived or self._capture_ready(self._current_target)):
                 return Action(
                     type=ActionType.NAVIGATE_TO,
                     target_position=self._current_target.position,
@@ -692,7 +712,7 @@ class DecisionEngine:
 
         # 导航 → 夹取（仅未夹取阶段需要到达目标）
         if not grip_done:
-            if not nav_arrived:
+            if not (nav_arrived or self._capture_ready(self._current_target)):
                 return Action(
                     type=ActionType.NAVIGATE_TO,
                     target_position=self._current_target.position,
@@ -764,7 +784,7 @@ class DecisionEngine:
         logger.warning(f"强制分离! 重置位姿到 ({new_pose[0]:.0f}, {new_pose[1]:.0f})")
         # 不清除 _current_target — 恢复后继续
 
-    def _handle_forced_reset(self) -> Action:
+    def _handle_forced_reset(self, rx: float, ry: float) -> Action:
         """处理强制分离恢复（T2-6）。
 
         ⚠️ 旧实现**无条件** `= FREE_RUN`：若此时首趟尚未有效完成，就等于绕过
@@ -1050,6 +1070,61 @@ class DecisionEngine:
             if not self._is_in_any_safe_zone(cx, cy):
                 return (cx, cy)
         return (FIELD_CENTER_X, FIELD_CENTER_Y)
+
+    # ---- 套取到位判据：看**套取框**，不是看车心 ----------------------------
+    #
+    # ⚠️ 2026-09-17 真机踩到，现场现象是"**物体堆卡在车下**"：
+    #   夹爪 V2 是**向下罩**的套取框，开口中心在**车心前方** `Placement.DROP_FORWARD_MM`
+    #   （默认 70mm）、半深 50mm ⇒ 物体必须落在车心前方 **[20,120]mm** 才真的在开口里。
+    #   而旧实现把"到位"判在**车心**上（`nav_arrived` = 车心距物体 < 40mm）→
+    #   车心压到物体上时才算到位，物体早已落在开口**后方** 70mm ⇒ 整车压过去。
+    #
+    #   为什么不是"把导航目标往前挪 70mm"（我第一版就是这么改的，**被仿真证伪**）：
+    #   那样得到的是 `目标 = 物体 − 70·单位向量(车→物体)`，**每帧都随车位置重算**
+    #   ⇒ 一个会跟着车走的移动设定点。实测车在追一个后退的目标，
+    #   目标从 (721,2246) 缓慢爬到 (724,2249)，永远到不了 → 集成仿真 5 个种子全 0 分。
+    #
+    #   正确做法：**导航目标保持物体本身**（静止、稳定），
+    #   把"到位"的判据从**车心**换成**套取框中心**（车心 + L·朝向）。
+    #   车心在 70mm 处、车头朝向物体时，框中心正好落在物体上 ⇒ 判定到位 ⇒ 交接套取。
+    def _capture_ready(self, target) -> bool:
+        """套取框是否已到"可以下压"的位置（矩形开口判据，见 `Placement`）。"""
+        try:
+            from ..config import Placement as _P
+            rx, ry, rtheta = self._pose
+            return bool(_P.should_stop_for_capture(
+                rx, ry, rtheta,
+                float(target.position[0]), float(target.position[1])))
+        except Exception:
+            return False
+
+    def _tool_offset_mm(self) -> float:
+        """套取框中心相对车心的前伸距离（mm）= `Placement.DROP_FORWARD_MM`。
+
+        与"释放瞬间目标相对车心的前伸距离"是**同一段几何**（目标套在框里时就在那个位置），
+        所以不必另立标定项。
+        """
+        try:
+            from ..config import Placement as _P
+            return float(getattr(_P, "DROP_FORWARD_MM", 70.0))
+        except Exception:
+            return 70.0
+
+    def _tool_pose(self, rx: float, ry: float, rtheta: float) -> Tuple[float, float]:
+        """套取框中心的场地坐标 = 车心 + L·(cosθ, sinθ)。"""
+        L = self._tool_offset_mm()
+        return (rx + L * math.cos(rtheta), ry + L * math.sin(rtheta))
+
+    def _is_at_capture(self, target, rx: float, ry: float, rtheta: float) -> bool:
+        """套取框是否已罩住目标（框心到目标 < CAPTURE_RADIUS_MM）。"""
+        try:
+            from ..config import Placement as _P
+            radius = float(getattr(_P, "CAPTURE_RADIUS_MM", 100.0))
+        except Exception:
+            radius = 100.0
+        gx, gy = self._tool_pose(rx, ry, rtheta)
+        tx, ty = float(target.position[0]), float(target.position[1])
+        return math.hypot(gx - tx, gy - ty) <= radius
 
     def _is_in_any_safe_zone(self, x: float, y: float) -> bool:
         """(x, y) 是否落在任一安全区内（世界地图持有场地布局）。"""

@@ -24,6 +24,12 @@ TITLE = "载荷台账一致性（S-40 假装载：计划≠实装必须被抓住
 #: 本趟计划的 3 个目标位置
 PLAN = ((2400.0, 2500.0), (400.0, 400.0), (2600.0, 400.0))
 
+# ⚠️ 2026-09-17：套取位的判据已从"车心圆"改为**套取框矩形开口**——开口中心在车心
+#   **前方** DROP_FORWARD_MM=70mm。所以"车心压在目标上"（原来直接用 PLAN[0] 当车姿）
+#   **不再**是合法套取位（那时目标落在开口后方 70mm，实车是压过去的）。
+#   正确停位 = 目标坐标 − 70mm（朝向目标）。
+CAPTURE_POSE = (PLAN[0][0] - 70.0, PLAN[0][1], 0.0)
+
 
 class _NavStub:
     """最小导航桩：只记录目标，不做规划（与真机 nav 的接口子集一致）"""
@@ -88,7 +94,7 @@ def run(ctx):
 
     nav = _NavStub()
     for _ in range(2):
-        tp.update(PLAN[0] + (0.0,), wm, nav)
+        tp.update(CAPTURE_POSE, wm, nav)
     st = tp.load_manager.state
     real = len(tp._captured)
     ev.append(f"[A] 车只到过第 1 个目标 (2400,2500)：load_manager.count={st.count}、"
@@ -145,8 +151,8 @@ def run(ctx):
     # ── C. 已持有目标时后退重试不得抬爪 ─────────────────────
     tp3 = _make_tp(field, color)
     tp3.start_trip([wm.targets[ids[0]]])
-    tp3.update(PLAN[0] + (0.0,), wm, nav)          # → CAPTURING
-    tp3.update(PLAN[0] + (0.0,), wm, nav)          # 套住 1 个
+    tp3.update(CAPTURE_POSE, wm, nav)              # → CAPTURING
+    tp3.update(CAPTURE_POSE, wm, nav)              # 套住 1 个
     held = len(tp3._captured)
     raised = {"n": 0}
     orig = tp3._sleeve.raise_up

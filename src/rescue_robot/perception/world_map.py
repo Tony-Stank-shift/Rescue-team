@@ -96,6 +96,28 @@ class WorldMap:
     # 【新 id、状态 ACTIVE】，导致已投放进安全区的目标被再次选中（重复扑空）。
     MAX_LOST_COUNT = 150
 
+    # ---- 静止目标的"遗忘"必须基于正面证据 ----------------------------------
+    # ⚠️ 2026-09-17 现场反馈："救援目标从视野中消失 3 秒就判定这个物体没了"。
+    #
+    # 问题在于 `MAX_LOST_COUNT` 把两件**完全不同**的事混为一谈：
+    #   ① "我没看见它"——可能只是车开走了、转了个弯，它出了相机视野；
+    #   ② "它不在了"——对手拿走 / 裁判取走 / 我已套走。
+    # 而救援目标是**贴在地上的静止物体**，不会自己跑。仅凭"3 秒没看见"就删除，
+    # 后果是一条恶性链：靠近过程中物体出视野 → 3s 后从地图消失 →
+    # `active_targets` 变空 → 决策层转去探索 → 车开去别处 → 更看不见它。
+    # 现场表现就是"识别到了但不去套，反而开走，然后说目标没了"。
+    #
+    # 现在改成：**只有机器人跑到目标最后已知位置附近（=`REVERIFY_RANGE_MM`），
+    # 相机有充分机会看到它，却连续 `MAX_LOST_COUNT` 帧没看到，才算它真不在了。**
+    # 在此之前，目标一直留在图上（上限 `MAX_LOST_COUNT_FAR` 兜底防内存无限增长）。
+    #: 认为"我们有充分机会看到它"的距离（mm）。
+    #: 相机可靠探测上限约 1138mm（`detection._min_contour_area=200px²` 反推），
+    #: 取 900mm 留余量：站到 900mm 以内还看不到，基本可断定它真不在了。
+    REVERIFY_RANGE_MM = 900.0
+    #: 远离目标时的丢失上限（帧，50Hz）：静止目标允许"长时间看不见"。
+    #: 60 秒足够跨过任何一次靠近/转弯/短暂遮挡，又不至于整场不清理。
+    MAX_LOST_COUNT_FAR = 50 * 60
+
     def __init__(self, field_layout: Optional[FieldLayout] = None):
         self._targets: Dict[int, TrackedTarget] = {}
         self._field = field_layout
@@ -236,7 +258,8 @@ class WorldMap:
 
     def update(self, detected_targets: List[DetectedTarget],
                robot_position: Tuple[float, float] = (0, 0),
-               timestamp: float = 0.0) -> None:
+               timestamp: float = 0.0,
+               vision_ok: bool = True) -> None:
         """
         主更新方法：融合新检测结果。
 
@@ -244,6 +267,10 @@ class WorldMap:
             detected_targets: 已分类的检测目标
             robot_position: 机器人当前位置
             timestamp: 当前时间戳
+            vision_ok: **视觉链路是否可用**。False 时（摄像头掉线/无帧）
+                **不累加丢失计数** —— 否则一次 3 秒的摄像头故障会把整张地图清空
+                （旧行为：`update([])` 每帧 +1 → 3s 后全部删除）。
+                这不是假设：真机摄像头 USB 松动/供电不足时就会这样。
         """
         if timestamp == 0.0:
             timestamp = time.time()
@@ -252,8 +279,10 @@ class WorldMap:
         self._total_detections += len(detected_targets)
 
         # 步骤 1：所有现有目标丢失计数 +1
-        for target in self._targets.values():
-            target.track_lost_count += 1
+        # ⚠️ 视觉不可用时**不计数**：看不见不等于不存在（见 vision_ok 说明）。
+        if vision_ok:
+            for target in self._targets.values():
+                target.track_lost_count += 1
 
         # 步骤 2：数据关联（最近邻）
         matched_existing: Set[int] = set()
@@ -289,13 +318,25 @@ class WorldMap:
             self._offer_pending(det, timestamp)
 
         # 步骤 4：移除过时目标
-        stale_ids = [
-            tid for tid, t in self._targets.items()
-            if t.track_lost_count > self.MAX_LOST_COUNT
-        ]
+        # ⚠️ **不能只看丢失帧数**。救援目标是贴地的静止物体，看不见 ≠ 不存在。
+        #    只有"我们跑到它最后已知位置附近、相机有充分机会看到它、却还是没看到"
+        #    才算它真不在了（原因详见 REVERIFY_RANGE_MM 的说明）。
+        stale_ids = []
+        for tid, t in self._targets.items():
+            if t.track_lost_count <= self.MAX_LOST_COUNT:
+                continue
+            near = (robot_position is not None
+                    and math.hypot(t.position[0] - robot_position[0],
+                                   t.position[1] - robot_position[1])
+                    <= self.REVERIFY_RANGE_MM)
+            limit = self.MAX_LOST_COUNT if near else self.MAX_LOST_COUNT_FAR
+            if t.track_lost_count > limit:
+                stale_ids.append(tid)
         for tid in stale_ids:
             target = self._targets.pop(tid)
-            logger.debug(f"移除过时目标: ID={tid}, {target.info.description}")
+            logger.info(f"移除过时目标: ID={tid}, {target.info.description} "
+                        f"@({target.position[0]:.0f},{target.position[1]:.0f}) "
+                        f"（已到其附近确认不在，丢失 {target.track_lost_count} 帧）")
 
     def _update_tracked(self, track_id: int, det: DetectedTarget,
                         timestamp: float) -> None:

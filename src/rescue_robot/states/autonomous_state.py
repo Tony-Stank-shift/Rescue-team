@@ -67,6 +67,12 @@ class AutonomousState:
     WATCHDOG_MOVE_MM = 40.0       # 一个窗口内累计位移超过此值 = 确实在动
     WATCHDOG_STEP_MIN_MM = 1.0    # 单帧位移下限：滤掉里程计抖动，避免把噪声当运动
     STUCK_WARN_S = 3.0            # 在下发速度却迟迟不动 → 提前告警（现场定位用）
+
+    # ── 2026-09-17 新增：**转动也算"在动"** ──
+    # 原地转向是合法的对准动作（位置一点不变），旧判据只看位置 → 车在按指令转
+    # 却判成"卡死"，10s 后 explore() 抢走导航目标 → 车被支使去别处、物体出视野。
+    WATCHDOG_TURN_RAD = math.radians(30.0)         # 窗口内累计转过这么多 = 确实在动
+    WATCHDOG_TURN_STEP_MIN_RAD = math.radians(1.0) # 单帧转角下限（滤噪声）
     #: 非"时间到"来源的 DONE 必须连续保持这么久才允许执行终场停车。
     #: 为什么需要确认窗口：DONE 一旦误判就是**不可恢复的整场结束**，
     #: 而它的判据曾包含"当前帧看不到目标"（开局未建图/摄像头掉线/目标在车上都会触发）。
@@ -195,6 +201,8 @@ class AutonomousState:
         # 看门狗：按里程计实际位移判定"是否在动"（见 _update_watchdog）
         self._last_motion_pose: Optional[tuple] = None   # 上一帧位姿
         self._motion_accum_mm: float = 0.0               # 本窗口累计位移
+        self._last_motion_theta: Optional[float] = None  # 上一帧航向
+        self._turn_accum_rad: float = 0.0                # 本窗口累计转角
         self._last_motion_time: float = time.time()      # 上次"确实在动"的时刻
         self._stuck_warned: bool = False                 # 打滑/堵转告警去重
         self._last_velocity: tuple = (0.0, 0.0)          # 由位姿差算出的实际速度（mm/s）
@@ -261,6 +269,8 @@ class AutonomousState:
         # 看门狗位移窗口复位（否则上一轮/初始化前的位姿差会被算成本轮位移）
         self._last_motion_pose = None
         self._motion_accum_mm = 0.0
+        self._last_motion_theta = None
+        self._turn_accum_rad = 0.0
         self._last_motion_time = time.time()
         self._stuck_warned = False
         self._loop_thread = threading.Thread(
@@ -591,7 +601,23 @@ class AutonomousState:
                                       dt=dt)
 
         # 记下本帧下发速度（下一帧喂给卡死检测）
-        self._last_cmd = (float(cmd.linear), 0.0)
+        # ⚠️ 旧实现写成 `(linear, 0.0)` —— **把角速度丢了**。卡死/打滑告警的判据是
+        #    `abs(linear) > 10 or abs(angular) > 0.01`，丢了 angular 之后
+        #    "在下发速度却不动"这类告警会漏报（原地转时 linear=0）。
+        self._last_cmd = (float(cmd.linear), float(cmd.angular))
+
+        # 诊断（2Hz）：把位姿与**实际下发速度**打出来。
+        # 为什么必须打：真机出问题时，日志里只有"是否在动"和一句 cmd v=…，
+        #   看不到 θ 与角速度 → 无法区分"在原地转"（linear=0/angular≠0）
+        #   和"真的没动"（两者都 0）。这两种的处置完全相反，缺了这两列只能靠猜。
+        if now - getattr(self, "_diag_last_log", 0.0) >= 0.5:
+            self._diag_last_log = now
+            logger.info(
+                f"📊 pose=({x:.0f},{y:.0f}) θ={math.degrees(theta):+.0f}° "
+                f"| cmd v={cmd.linear:+.0f}mm/s w={cmd.angular:+.2f}rad/s "
+                f"| 目标={self._navigation.target} "
+                f"| nav={self._navigation.state.name} "
+                f"| 转运={self._transport.phase.name}")
 
         # ── 5. 底盘执行：串口下发（真机）或 controller（占位）──
         if self._chassis is not None:
@@ -617,7 +643,7 @@ class AutonomousState:
                 self._transport.load_manager.last_release_valid)
 
         # ── 9. 看门狗：按【里程计实际位移】判定是否在动（不是看下发速度）──
-        self._update_watchdog((x, y), cmd, dt=dt)
+        self._update_watchdog((x, y, theta), cmd, dt=dt)
 
     #: 保活（探索/绕圈）优先窗口时长（秒）。窗口内忽略决策引擎的目标（T1-10）。
     KEEPALIVE_HOLD_S = 4.0
@@ -709,6 +735,15 @@ class AutonomousState:
 
     # ---- 看门狗 ----
 
+    @staticmethod
+    def _normalize_angle(a: float) -> float:
+        """把角度归一化到 (-pi, pi]。"""
+        while a > math.pi:
+            a -= 2.0 * math.pi
+        while a <= -math.pi:
+            a += 2.0 * math.pi
+        return a
+
     def _update_watchdog(self, pose_xy, cmd, dt: float = 0.02,
                          now: Optional[float] = None) -> float:
         """
@@ -721,7 +756,9 @@ class AutonomousState:
         改为：只有下位机里程计位置**真的变了**（累计位移 ≥ WATCHDOG_MOVE_MM）才算动。
 
         Args:
-            pose_xy: 本帧位姿 (x, y)（真机来自串口 ODOM，Mock 来自导航定位器）
+            pose_xy: 本帧位姿 ``(x, y)`` 或 ``(x, y, theta)``。
+                ⚠️ **必须带 theta**：原地转向是合法的对准动作，位置不变但车在动。
+                只传 (x,y) 时退化为旧行为（仅位置判据），仅为兼容既有测试。
             cmd: 本帧下发的速度指令（仅用于"打滑告警"诊断，不用于判定是否在动）
             dt: 帧间隔（秒），用于由位移差算实际速度
             now: 注入时钟（便于测试；None → time.time()）
@@ -733,6 +770,7 @@ class AutonomousState:
             now = time.time()
 
         x, y = float(pose_xy[0]), float(pose_xy[1])
+        theta = float(pose_xy[2]) if len(pose_xy) > 2 else None
 
         if self._last_motion_pose is None:
             self._last_motion_pose = (x, y)
@@ -749,9 +787,26 @@ class AutonomousState:
         if step_mm >= self.WATCHDOG_STEP_MIN_MM:
             self._motion_accum_mm += step_mm
 
-        if self._motion_accum_mm >= self.WATCHDOG_MOVE_MM:
-            # 确实在动 → 刷新保活计时、解除降级
+        # ── 累计**转动**（2026-09-17 真机新增）────────────────────────────
+        # 为什么必须算转动：原来只按位置判"在不在动"，而**原地转向位置根本不变** ——
+        # 车明明在按指令转（对准目标），却被判成"卡死"，10s 后看门狗调用
+        # `navigation.explore()` 把导航目标抢成一个随机点 → 车被支使去别处 →
+        # 刚看到的物体出了视野，之后地图里也没有它了。
+        # 现场现象正是"识别到物体却不去套，反而开走"。
+        # 现在：转动累计超过阈值同样算"在动"（刷新保活、解除降级）。
+        if theta is not None:
+            if self._last_motion_theta is None:
+                self._last_motion_theta = theta
+            dth = abs(self._normalize_angle(theta - self._last_motion_theta))
+            self._last_motion_theta = theta
+            if dth >= self.WATCHDOG_TURN_STEP_MIN_RAD:
+                self._turn_accum_rad += dth
+
+        if (self._motion_accum_mm >= self.WATCHDOG_MOVE_MM
+                or self._turn_accum_rad >= self.WATCHDOG_TURN_RAD):
+            # 确实在动（平移或转动）→ 刷新保活计时、解除降级
             self._motion_accum_mm = 0.0
+            self._turn_accum_rad = 0.0
             self._last_motion_time = now
             self._last_action_time = now
             self._explore_triggered = False

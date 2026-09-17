@@ -56,7 +56,23 @@ def run(ctx):
                    "检查 LoadManager 的首次转运规则")
 
     nav = _FakeNav()
-    pose = (800.0, 800.0, 0.0)              # 已在目标旁 → 应立刻进入套取
+
+    # ⚠️ 2026-09-17：**套取位的判据从"车心圆"改成了"套取框矩形开口"**。
+    #    开口中心在车心**前方** DROP_FORWARD_MM(70mm)，所以"车心压在物体上"
+    #    （本场景原来用的 pose=(800,800)）**不是**合法套取位 —— 那时物体落在开口
+    #    后方 70mm，等于整车压过去（现场现象："物体堆卡在车下"）。
+    #    先用反向断言把这个坑钉住，再用正确停位（车心在物体后方 70mm）跑全流程。
+    from rescue_robot.config import Placement as _P
+    _L = float(_P.DROP_FORWARD_MM)
+    _bad_ok = _P.object_in_sleeve(800.0, 800.0, 0.0, 800.0, 800.0)
+    ev.append(f"反向对照：车心压在物体上 → 判为在开口内 = {_bad_ok}（应为 False）")
+    if _bad_ok:
+        return bad(MODULE, "矩形开口判据退了：车心压在物体上竟判为'在开口内'", ev,
+                   "检查 config.Placement.object_in_sleeve 的前后向窗口")
+
+    # 正确套取位：车心在物体后方 L=70mm、朝向物体（θ=0 朝 +x ⇒ 物体在正前方）
+    pose = (800.0 - _L, 800.0, 0.0)
+    ev.append(f"套取位 pose=({pose[0]:.0f},{pose[1]:.0f},0°)：目标在正前方 {_L:.0f}mm")
     seq = []
     for _ in range(200):
         tp.update(pose, None, nav)

@@ -94,10 +94,16 @@ def test_s40_no_phantom_load():
     ok, _ = tp.start_trip(targets)
     check("start_trip 接受本趟计划(≤3)", ok)
 
+    # ⚠️ 2026-09-17：套取位的判据已从"车心圆"改为**套取框矩形开口**
+    #    （开口中心在车心**前方** DROP_FORWARD_MM=70mm）。因此"车心压在目标上"
+    #    （原来用的 pose = 目标坐标）**不再**是合法套取位 —— 那时目标落在开口
+    #    后方 70mm，实车是压过去的（现场现象："物体堆卡在车下"）。
+    #    这里改用**正确停位**：车心在目标后方 70mm、朝向目标（θ=0 朝 +x）。
+    _cap = (2400.0 - 70.0, 2500.0, 0.0)      # 车心在目标后方 70mm
     # 车只开到第 1 个目标（第 1 帧：APPROACHING→CAPTURING 并显式停车；
     # 第 2 帧：真正下压套取 —— 套取动作本身要跨帧完成）
-    tp.update((2400.0, 2500.0, 0.0), wm, _NavStub())
-    tp.update((2400.0, 2500.0, 0.0), wm, _NavStub())
+    tp.update(_cap, wm, _NavStub())
+    tp.update(_cap, wm, _NavStub())
     st = tp.load_manager.state
     check("只到第 1 个目标 → 只记入 1 个（旧实现=3）", st.count == 1,
           f"实际 count={st.count} ids={st.target_ids}")
@@ -121,8 +127,9 @@ def test_s40_no_phantom_load():
     print("[4] S-40 已持有目标时后退重试不得抬爪（抬爪=释放）")
     tp3 = _tp(wm)
     tp3.start_trip([wm.targets[ids[0]]])
-    tp3.update((2400.0, 2500.0, 0.0), wm, _NavStub())    # → CAPTURING
-    tp3.update((2400.0, 2500.0, 0.0), wm, _NavStub())    # 套住 1 个
+    _cap3 = (2400.0 - 70.0, 2500.0, 0.0)     # 同上：正确套取位
+    tp3.update(_cap3, wm, _NavStub())        # → CAPTURING
+    tp3.update(_cap3, wm, _NavStub())        # 套住 1 个
     check("已持有 1 个", len(tp3._captured) == 1,
           f"captured={len(tp3._captured)} phase={tp3.phase.name}")
     raised = {"n": 0}

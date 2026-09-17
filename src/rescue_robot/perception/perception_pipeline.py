@@ -297,7 +297,10 @@ class PerceptionPipeline:
             target.position = (robot_position[0] + dx, robot_position[1] + dy)
 
         # ─── 步骤 4：世界地图更新 ───
-        self._world_map.update([t for t, _p in positioned], robot_position, timestamp)
+        # 传 vision_ok：视觉掉线时**不累加丢失计数**，否则一次 3 秒的摄像头故障
+        # 就会把整张地图清空（旧行为）。
+        self._world_map.update([t for t, _p in positioned], robot_position,
+                               timestamp, vision_ok=self._vision_available)
 
         # ─── 步骤 5：对方跟踪 ───
         # 从检测中提取对方机器人（不是目标的其他移动物体）

@@ -295,6 +295,22 @@ class TransportPipeline:
         else:
             logger.warning("未注入停车回调：套取期间底盘靠看门狗停车（可能前冲）")
 
+    def _in_sleeve(self, rx: float, ry: float, rtheta: float, target) -> bool:
+        """目标是否落在套取框**矩形开口**内（替代原来的圆形 `CAPTURE_RADIUS_MM`）。
+
+        ⚠️ 原实现用"车心到目标的距离 < CAPTURE_RADIUS_MM"这个**圆**判据，与
+        150×100 的**矩形**开口不匹配：目标在圆内但不在开口下方（在车侧、或已在
+        车心正下＝开口后方）时会被判成"到位"→ 软件记账套住、实车套空。
+        配置与注释一直声称"已按矩形开口复核"，但**代码里从来没实现过**（本次补上）。
+        """
+        try:
+            from ..config import Placement as _P
+            return bool(_P.object_in_sleeve(rx, ry, rtheta,
+                                            float(target.position[0]),
+                                            float(target.position[1])))
+        except Exception:
+            return self._distance((rx, ry), target.position) < self.CAPTURE_RADIUS_MM
+
     def _begin_retreat(self, rx: float, ry: float, rtheta: float, nav) -> None:
         """套取失败后：抬起夹爪 → 朝目标反方向后退 RETREAT_MM → 准备重试。
 
@@ -415,7 +431,9 @@ class TransportPipeline:
                 target = self._current_targets[
                     min(self._capture_index, len(self._current_targets) - 1)]
                 dist = self._distance((rx, ry), target.position)
-                if dist < self.CAPTURE_RADIUS_MM:  # 到达套取范围
+                # ⚠️ 用**矩形开口**判据，不是圆。圆判据允许"目标在圆内但不在开口下方"
+                #    （例如在车侧或已在车心正下）→ 软件记账套住、实车套空。
+                if self._in_sleeve(rx, ry, rtheta, target):  # 到达套取范围
                     self._phase = TransportPhase.CAPTURING
                     # 显式停车：清导航目标 + 立即下发停车，保证套取全程底盘静止
                     self._halt_for_capture(nav)
@@ -437,7 +455,7 @@ class TransportPipeline:
 
             target = self._current_targets[self._capture_index]
             dist = self._distance((rx, ry), target.position)
-            if dist > self.CAPTURE_RADIUS_MM:
+            if not self._in_sleeve(rx, ry, rtheta, target):
                 logger.warning(
                     f"套取位姿复核不通过：距目标#{target.id} {dist:.0f}mm > "
                     f"{self.CAPTURE_RADIUS_MM:.0f}mm → 回到接近阶段重新对位"

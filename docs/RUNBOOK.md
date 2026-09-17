@@ -340,6 +340,25 @@ START_ZONE=4 TEAM_COLOR=red START_HEADING_DEG=-45 ./run.sh
 例如 `START_ZONE=4 START_HEADING_DEG=45`，后退方向 225°，落点 **(1789, −911) 直接倒出场外**；
 不填朝向时软件的"朝内侧"默认值在 4 号区同样是 **❌ 倒出场外**。
 
+#### 1.7.2 诊断日志（2Hz）—— 现场排"车不动"必看
+
+进 AUTONOMOUS 后每 0.5 秒打一行：
+
+```
+📊 pose=(1520,1520) θ=-45° | cmd v=0mm/s w=+0.85rad/s | 目标=(1527,1522) | nav=MOVING | 转运=APPROACHING
+```
+
+**为什么要这两列**：只看"是否在动" + 一句 `cmd v=…` **区分不出**两种完全相反的故障 ——
+
+| 现象 | 含义 | 处置方向 |
+|---|---|---|
+| `v=0` 但 `w≠0` | **在原地转**（在按指令对准） | 正常；若长时间不动见 §2.2 |
+| `v=0` 且 `w=0` | 真的没有任何指令 | 查决策层是否在 WAIT（无目标/降级） |
+| `v≠0` 但 pose 不变 | **打滑/堵转**（骑在物体/减速带上） | 查物理卡阻 |
+
+2026-09-17 那次"识别到物体却不去套"就是**因为日志缺这两列**，
+在"倾角标定""朝向符号"上白绕了两圈。见 `docs/audit/PICKUP_CHAIN_FIX_20260917.md`。
+
 **开场退避**：进 AUTONOMOUS 后自动直线退一段把车带出出发区/减速带，
 无需人工补发指令。配置在 `config/robot.default.yaml`：
 ```yaml
@@ -688,6 +707,7 @@ PYTHONPATH=src python3 tools/hw_selftest.py --duration 5       # 遥测/速度�
 | `docs/GRIPPER_V2_GEOMETRY.md` | 夹爪 V2 几何、套取参数标定 |
 | `docs/HW_SELFTEST.md` | 硬件自检怎么用 |
 | `docs/audit/FULL_PROBLEM_LIST.md` | 全部已知问题清单与状态 |
+| `docs/audit/PICKUP_CHAIN_FIX_20260917.md` | 套取链修复（不开套 / 压到车下 / 开局误报急停）与诊断日志说明 |
 | `docs/audit/REAL_MACHINE_DEBUG_20260916.md` | 首次真机联调排查全记录（含固件两处"变砖级"修复） |
 | `docs/audit/GOAL_ANALYSIS.md` | 目标/规则层分析 |
 
