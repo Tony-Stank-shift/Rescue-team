@@ -32,7 +32,7 @@ from .states.autonomous_state import AutonomousState
 from .hardware.button import MockButton, GPIOButton
 from .hardware.indicator import MockIndicator, LEDIndicator
 from .perception.field_elements import (
-    FieldLayout, SafeZoneColor, StandardFieldLayout, resolve_start_heading_deg,
+    FieldLayout, SafeZoneColor, StandardFieldLayout, resolve_start_heading,
 )
 from .perception.perception_pipeline import PerceptionPipeline
 from .navigation.navigation_pipeline import NavigationPipeline
@@ -274,18 +274,27 @@ def main():
         if not 1 <= start_zone <= 4:
             logger.warning(f"START_ZONE={start_zone} 非法（应为 1~4），回退 3 号出发区")
             start_zone = 3
-        # 车头实际朝向（现场实测，度；不设则按"朝场地内侧"自动推断）
+        # 车头实际朝向（现场实测，度；不设则按出发区自动推导）
         # ⚠️ 现场小车常不是正朝场内摆的（例：斜 45° 摆在出发区对角线上），
         #    而这个角度直接决定**整张地图的旋转**：假设错多少度，地图就转错多少度，
         #    表现为位姿跑到场外、A* 起点不可通行、车一动不动。
-        #    统一走 resolve_start_heading_deg()，保证 AutonomousState 用的是同一来源。
-        _heading_deg = resolve_start_heading_deg()
+        #    统一走 resolve_start_heading()，保证 AutonomousState 用的是同一来源。
+        _heading_deg, _heading_src = resolve_start_heading(start_zone)
         start_pose = StandardFieldLayout().get_start_pose(
             start_zone, heading_deg=_heading_deg)
-        if _heading_deg is not None:
+        if _heading_src == "env":
             logger.warning(f"⚠️ 使用现场实测车头朝向 START_HEADING_DEG="
-                           f"{_heading_deg:.1f}°（覆盖默认的'朝场地内侧'）"
+                           f"{_heading_deg:.1f}°（覆盖自动推导）"
                            f"—— 请确认与小车实际摆位一致！")
+        elif _heading_src == "auto":
+            logger.info(f"车头朝向：按出发区 {start_zone} 号自动推导 = "
+                        f"{_heading_deg:+.0f}°（摆位约定：车头朝出发区外侧角）")
+            logger.info("  ↳ 若本次摆位不是『车头朝外侧角』，"
+                        "请显式设 START_HEADING_DEG=<实测角度> 覆盖")
+        else:
+            logger.warning("车头朝向：未设 START_HEADING_DEG 且区号无法推导 → "
+                           "回退到默认『朝场地内侧』。若小车不是正朝场内摆的，"
+                           "这个默认值是错的（地图会整体转错）！")
         logger.info(f"抽签出发区 = {start_zone} 号 → 起点 {start_pose}")
 
         perception = PerceptionPipeline(use_mock=use_mock, my_safe_zone_color=my_color)

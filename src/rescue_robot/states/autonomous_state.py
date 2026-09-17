@@ -120,11 +120,15 @@ class AutonomousState:
         #       autonomous_state: 朝向=-90°   ← 被这里覆盖
         #    → 位姿整体转错 → A* 起点跑到场外 → 车一动不动。
         from ..perception.field_elements import (
-            StandardFieldLayout, resolve_start_heading_deg,
+            StandardFieldLayout, resolve_start_heading,
         )
         self._start_zone = int(start_zone)
+        # ⚠️ 参数必须与 main.py 同源（同一个 resolve_start_heading）。
+        #    保存来源，供下方日志如实说明这个角度是现场实测还是自动推导。
+        _h_deg, self._start_heading_src = resolve_start_heading(self._start_zone)
+        self._start_heading_deg = _h_deg
         _pose = StandardFieldLayout().get_start_pose(
-            self._start_zone, heading_deg=resolve_start_heading_deg()) \
+            self._start_zone, heading_deg=_h_deg) \
             or (150.0, 150.0, 1.5707963267948966)
         self._start_pose: tuple = _pose
 
@@ -334,9 +338,15 @@ class AutonomousState:
             self._navigation.reset_pose(x, y, theta)
         except Exception as e:
             logger.warning(f"同步导航定位器位姿失败: {e}")
+        _src_txt = {"env": "现场实测 START_HEADING_DEG",
+                    "auto": "按出发区自动推导（车头朝外侧角）",
+                    "none": "默认值（未设 START_HEADING_DEG）",
+                    }.get(getattr(self, "_start_heading_src", "none"), "未知")
         logger.info(f"坐标系初始化：出发区 {self._start_zone} 号，"
                     f"起点=({x:.0f}, {y:.0f})mm，朝向={math.degrees(theta):.0f}°"
                     f"（请现场核对是否与抽签结果一致）")
+        logger.info(f"  ↳ 朝向来源：{_src_txt}；"
+                    f"⚠️ 此角度必须与 main.py 打印的一致，否则整张地图会转错")
 
     def on_exit(self) -> None:
         """退出 AUTONOMOUS 状态：停止主循环"""

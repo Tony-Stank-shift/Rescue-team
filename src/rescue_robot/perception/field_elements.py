@@ -11,35 +11,84 @@ field_elements.py —— 场地元素定义
 
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("field_elements")
 
 
-def resolve_start_heading_deg() -> Optional[float]:
-    """从环境变量 ``START_HEADING_DEG`` 读取**现场实测的车头朝向**（度）；未设/非法返回 None。
+# ============================================================
+# 出发区 → 车头朝向（现场摆位约定）
+# ============================================================
+#
+#: 现场摆位约定：**车身斜 45° 摆在出发区正方形的对角线上、车头朝「出发区的外侧角」**
+#: （即背离场地中心的那一角），因此开场动作是**后退**斜穿进场。
+#:
+#: 为什么要把朝向和区号绑定成一张表：朝向是**每换一个出发区就必须改的量**，
+#: 而它是区号的纯函数 —— 由公式 ``atan2(角y - 区中心y, 角x - 区中心x)`` 唯一确定。
+#: 让现场每次手算/手填这个角度，等于每换一个区就多一个出错机会，
+#: 而**填错的代价是整张地图旋转错**（症状：位姿跑到场外、A* 起点不可通行、车一动不动）。
+#:
+#: ⚠️ 前提是**摆位符合上面那条约定**。若某次摆法不同（例如车头朝场地中心、
+#: 或与场地边线平行），必须显式设 ``START_HEADING_DEG`` 覆盖本表。
+PLACEMENT_OUTWARD_HEADING_DEG: Dict[int, float] = {
+    1: 135.0,   # 左上 (150,2850) → 外侧角 (0,3000)
+    2: 45.0,    # 右上 (2850,2850) → 外侧角 (3000,3000)
+    3: -135.0,  # 左下 (150,150)  → 外侧角 (0,0)
+    4: -45.0,   # 右下 (2850,150) → 外侧角 (3000,0)
+}
 
-    为什么需要它：现场小车常常不是正朝场内摆的 —— 例如"斜 45° 摆在出发区
-    正方形的对角线上"。而这个角度直接决定**整张地图的旋转**：假设错多少度，
-    地图就整体转错多少度（表现为位姿跑到场外、A* 起点不可通行、车一动不动）。
 
-    ⚠️ 必须由**所有**需要出发区位姿的地方统一调用（``main.py`` 与
-    ``AutonomousState``）—— 曾经 ``AutonomousState`` 自己重算了一遍却没带
-    这个参数，把用户设好的朝向覆盖回默认值（日志里 main 显示 +45°、
-    autonomous_state 却显示 -90°），现场极难察觉。
-    """
-    import os
-    raw = os.environ.get("START_HEADING_DEG", "").strip()
-    if not raw:
-        return None
+def auto_start_heading_deg(zone_id: Optional[int]) -> Optional[float]:
+    """按「车头朝出发区外侧角」的摆位约定，由区号推车头朝向（度）。区号非法返回 None。"""
     try:
-        return float(raw)
-    except ValueError:
-        logger.error(f"START_HEADING_DEG={raw!r} 不是数字 → 忽略，"
-                     f"改用默认朝向（朝场地内侧）")
+        return PLACEMENT_OUTWARD_HEADING_DEG.get(int(zone_id))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
         return None
+
+
+def resolve_start_heading(zone_id: Optional[int] = None) -> Tuple[Optional[float], str]:
+    """统一解析**车头朝向**，返回 ``(角度_度_or_None, 来源)``。
+
+    来源取值：
+
+    ==========  ==========================================================
+    ``"env"``   ``START_HEADING_DEG`` 有效 → 现场实测值，**优先级最高**
+    ``"auto"``  环境变量未设（或非法）→ 按区号查 :data:`PLACEMENT_OUTWARD_HEADING_DEG`
+    ``"none"``  既没环境变量、区号也不在表里 → 交给调用方用默认「朝内侧」
+    ==========  ==========================================================
+
+    ⚠️ **必须由所有需要出发区位姿的地方统一调用**（``main.py`` 与
+    ``AutonomousState``）—— 曾经 ``AutonomousState`` 自己重算了一遍却没带这个
+    参数，把 ``main.py`` 里设好的朝向覆盖回默认值（日志里 main 显示 +45°、
+    autonomous_state 却显示 -90°），现场极难察觉。
+
+    返回来源而非只返回角度，是为了让日志能**如实说明这个角度是哪来的**：
+    自动推导出来的值被打印成「现场实测值」会让人误以为摆位已被核对过。
+    """
+    raw = os.environ.get("START_HEADING_DEG", "").strip()
+    if raw:
+        try:
+            return float(raw), "env"
+        except ValueError:
+            logger.error(f"START_HEADING_DEG={raw!r} 不是数字 → 忽略，"
+                         f"改按出发区自动推导")
+    auto = auto_start_heading_deg(zone_id)
+    if auto is not None:
+        return auto, "auto"
+    return None, "none"
+
+
+def resolve_start_heading_deg(zone_id: Optional[int] = None) -> Optional[float]:
+    """只要角度不要来源的简写；语义等同 :func:`resolve_start_heading` 的第 0 项。
+
+    保留它是为了兼容既有调用与验证脚本。**新代码请直接用
+    :func:`resolve_start_heading`**，因为它还能告诉你这个角度是现场实测的还是
+    自动推导的 —— 日志里把两者混为一谈会让人误以为摆位已经被核对过。
+    """
+    return resolve_start_heading(zone_id)[0]
 
 
 # ============================================================
@@ -323,7 +372,10 @@ class StandardFieldLayout:
             heading_mode:
                 "inward"（默认）—— 朝场地内侧（1/2 号区朝 -Y，3/4 号区朝 +Y），
                     不依赖安全区颜色，简单可预测；
-                "center"—— 朝场地中心 (1500,1500) 方向。
+                "center"—— 朝场地中心 (1500,1500) 方向；
+                "outward"—— 朝出发区的**外侧角**（见
+                    :data:`PLACEMENT_OUTWARD_HEADING_DEG`），即现场摆位约定。
+                    注意这是**摆位约定**而非场地几何，默认值仍是 "inward"。
             heading_deg: **现场实测的车头朝向（度；场地坐标系，逆时针为正，0=+X）**。
                 给定时**优先于 heading_mode**。
 
@@ -356,6 +408,14 @@ class StandardFieldLayout:
         if heading_mode == "center":
             import math as _m
             return (cx, cy, _m.atan2(FIELD_SIZE / 2 - cy, FIELD_SIZE / 2 - cx))
+
+        if heading_mode == "outward":
+            # 车头朝「出发区的外侧角」（背离场地中心的那一角）—— 现场摆位约定，
+            # 见 PLACEMENT_OUTWARD_HEADING_DEG。配合负的 startup_backup_mm_s，
+            # 「后退」即斜穿进场。
+            deg = auto_start_heading_deg(zone_id)
+            if deg is not None:
+                return (cx, cy, math.radians(deg))
 
         # 出发区在四角：上半场(y>1500)朝 -Y（+Y 是场外），下半场朝 +Y
         theta = -math.pi / 2 if cy > FIELD_SIZE / 2 else math.pi / 2
