@@ -10,7 +10,7 @@ hw_selftest —— 智能救援机器人「分部实机自检」总入口
     PYTHONPATH=src python3 tools/hw_selftest.py                 # 跑全部
     PYTHONPATH=src python3 tools/hw_selftest.py --list          # 列出模块
     PYTHONPATH=src python3 tools/hw_selftest.py --only servo    # 只跑一个（可逗号分隔）
-    PYTHONPATH=src python3 tools/hw_selftest.py --mock          # 无硬件：环境项按 SKIP
+    PYTHONPATH=src python3 tools/hw_selftest.py --mock          # **不碰硬件**：串口一律不打开
     PYTHONPATH=src python3 tools/hw_selftest.py --yes-motion    # 允许驱动电机（先架起轮子！）
     PYTHONPATH=src python3 tools/hw_selftest.py --image a.jpg   # 视觉模块用离线图
     PYTHONPATH=src python3 tools/hw_selftest.py --port /dev/ttyS1 --duration 3

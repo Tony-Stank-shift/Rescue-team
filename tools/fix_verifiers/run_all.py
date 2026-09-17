@@ -23,6 +23,7 @@ SCRIPTS = [
     ("S-40/S-01/N-1/B8/U4/U5/N-6 队长护栏", "verify_s40_s01_team.py"),
     ("SEARCH 搜索覆盖：中央优先 + 全场蛇形不碾物体", "verify_search_coverage.py"),
     ("PICKUP 套取链：停位/近距爬行/看门狗算转动/计时复位", "verify_pickup_chain.py"),
+    ("SAFETY 自检闸门：--mock 不得碰硬件 / 动作模块必须挂闸门", "verify_selftest_safety.py"),
 ]
 
 

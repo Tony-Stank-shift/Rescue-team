@@ -136,6 +136,14 @@ class Ctx:
 
     def open_chassis(self):
         """打开串口底盘；失败时返回 (None, Result)（含人话原因分类）"""
+        if self.mock:
+            # ⚠️ 2026-09-17 事故修复：`--mock` 的语义必须是**不碰硬件**。
+            #    旧实现这里**照样打开真实串口**，而 `need_motion()` 又因为 mock 放行
+            #    → 在连着真车的机器上跑 `--mock` 会**对着真车发指令**。
+            return None, skip(
+                "serial", "--mock 模式不访问真实硬件（未打开串口）",
+                ["--mock 的语义 = 不碰硬件"],
+                "要真机自检请去掉 --mock；会驱动执行机构的项还需 --yes-motion")
         if self._chassis is not None:
             return self._chassis, None
         if self._chassis_error is not None:
@@ -192,6 +200,10 @@ class Ctx:
 
     def raw_serial(self):
         """打开一个裸串口用于**只读嗅探**原始行（不改变协议实现）"""
+        if self.mock:
+            return None, skip("telemetry", "--mock 模式不访问真实硬件（未打开串口）",
+                              ["--mock 的语义 = 不碰硬件"],
+                              "要真机自检请去掉 --mock")
         if self._raw is not None:
             return self._raw, None
         try:
@@ -225,9 +237,21 @@ class Ctx:
                             list(err.evidence), err.hint)
 
     def need_motion(self, module: str) -> Optional[Result]:
-        """会驱动电机的测试的统一闸门"""
-        if self.mock:
-            return None                       # Mock 模式不需要真机
+        """会驱动**执行机构**（电机/舵机）的测试的统一闸门。
+
+        ⚠️ 2026-09-17 事故修复：原来第一行是 `if self.mock: return None`
+        （注释写着"Mock 模式不需要真机"→ 直接放行）。但 `open_chassis()` 当时
+        **根本不看 mock**，照样打开真实 /dev/ttyS1 —— 于是 `--mock`
+        **不但没保护，反而关掉了动作闸门**，让 servo / odometry / motors / velocity
+        四个模块对着真车发指令。
+
+        实测（RDK 上跑 `hw_selftest.py --mock`）：夹爪先动 → 轮子转 → 小车往前走，
+        且输出 `SKIP=0`（一个都没跳过，就是铁证）。
+
+        闸门的判据只能是"**会不会碰真实执行机构**"，与 --mock 无关。
+        `--mock` 现在会让串口直接打不开（见 `open_chassis`），
+        所以各模块会在更早的地方 SKIP 掉。
+        """
         if not self.yes_motion:
             return skip(module,
                         "该测试会**驱动执行机构**（电机/舵机），需显式加 --yes-motion 才执行",
