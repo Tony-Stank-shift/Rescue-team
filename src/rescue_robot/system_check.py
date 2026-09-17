@@ -189,13 +189,51 @@ class RealHardwareChecker(HardwareChecker):
         # 无独立温度传感器（非关键项），跳过即通过
         return True
 
+    #: 底盘连通性探测的重试策略。
+    #: 下位机的**命令接收存在秒级静默窗口**（2026-09-16 实测：PING 应答晚到
+    #: 2010ms 才回来，而同一时刻下一条 PING 却 2ms 就通）——偶发、可自愈。
+    #: 单次探测撞进窗口就会误判"串口故障"→ BOOT 自检失败 → 车拒绝启动
+    #: （现场实际发生，而电机本身完全正常）。故重试若干次并留间隔。
+    PROBE_ATTEMPTS: int = 4
+    PROBE_TIMEOUT_S: float = 1.5
+    PROBE_GAP_S: float = 0.4
+
     def check_motor(self, motor_id: int) -> bool:
-        # 电机正反转测试需真机；框架先用串口 PING 探测底盘连通
-        if self._chassis is not None and self._chassis.is_open:
+        """底盘连通性探测（PING → PONG，带重试）。
+
+        ⚠️ 名字叫"电机检查"，但它**不检测电机本体** —— 电机正反转/测速必须真的驱动
+        轮子，见 ``tools/hw_selftest.py`` 的 motors / velocity 模块（需 ``--yes-motion``）。
+        本项实际只验证一件事：**上位机 ↔ 下位机串口链路是否活着**。
+
+        现场实测踩到的三个坑（都会导致 BOOT 自检失败、车拒绝启动）：
+
+        1) **超时不能短**：下位机主循环穿插发送约 84 行/秒遥测，PONG 往返偶发变慢。
+           旧代码用 ``send_ping()`` 默认 0.5s → 误报 FAIL
+           （日志 ``电机 #1: 检查未通过 (505ms)``，505ms 正是超时到期）。
+
+        2) **发 PING 前必须排空残留行**：否则上一条命令迟到的应答会被本次
+           ``wait_for`` 立刻捡到，出现假通过
+           （日志 ``电机 #2: 正常 (3ms)`` —— 3ms 就是捡到 #1 残留的 PONG）。
+
+        3) **必须重试**：下位机命令接收有**秒级静默窗口**且可自愈
+           （实测 ``电机 #1: 检查未通过 (2010ms)`` 之后，``电机 #2`` 2ms 就通）。
+           单次探测撞进去 = 误判整机故障。现重试 ``PROBE_ATTEMPTS`` 次、每次留间隔。
+        """
+        if self._chassis is None or not self._chassis.is_open:
+            return False
+        for attempt in range(1, self.PROBE_ATTEMPTS + 1):
             try:
-                return self._chassis.send_ping()
-            except Exception:
-                return False
+                self._chassis.drain_lines()
+                if self._chassis.send_ping(timeout=self.PROBE_TIMEOUT_S):
+                    if attempt > 1:
+                        logger.info(
+                            f"底盘连通性探测第 {attempt} 次成功（前 {attempt - 1} 次"
+                            f"撞上下位机接收静默窗口，属已知偶发）")
+                    return True
+            except Exception as e:
+                logger.warning(f"底盘连通性探测第 {attempt} 次异常: {e}")
+            if attempt < self.PROBE_ATTEMPTS:
+                time.sleep(self.PROBE_GAP_S)
         return False
 
     def check_battery_voltage(self) -> float:

@@ -31,7 +31,9 @@ from .states.debug_state import DebugState
 from .states.autonomous_state import AutonomousState
 from .hardware.button import MockButton, GPIOButton
 from .hardware.indicator import MockIndicator, LEDIndicator
-from .perception.field_elements import FieldLayout, SafeZoneColor, StandardFieldLayout
+from .perception.field_elements import (
+    FieldLayout, SafeZoneColor, StandardFieldLayout, resolve_start_heading_deg,
+)
 from .perception.perception_pipeline import PerceptionPipeline
 from .navigation.navigation_pipeline import NavigationPipeline
 from .decision.decision_engine import DecisionEngine
@@ -272,7 +274,18 @@ def main():
         if not 1 <= start_zone <= 4:
             logger.warning(f"START_ZONE={start_zone} 非法（应为 1~4），回退 3 号出发区")
             start_zone = 3
-        start_pose = StandardFieldLayout().get_start_pose(start_zone)
+        # 车头实际朝向（现场实测，度；不设则按"朝场地内侧"自动推断）
+        # ⚠️ 现场小车常不是正朝场内摆的（例：斜 45° 摆在出发区对角线上），
+        #    而这个角度直接决定**整张地图的旋转**：假设错多少度，地图就转错多少度，
+        #    表现为位姿跑到场外、A* 起点不可通行、车一动不动。
+        #    统一走 resolve_start_heading_deg()，保证 AutonomousState 用的是同一来源。
+        _heading_deg = resolve_start_heading_deg()
+        start_pose = StandardFieldLayout().get_start_pose(
+            start_zone, heading_deg=_heading_deg)
+        if _heading_deg is not None:
+            logger.warning(f"⚠️ 使用现场实测车头朝向 START_HEADING_DEG="
+                           f"{_heading_deg:.1f}°（覆盖默认的'朝场地内侧'）"
+                           f"—— 请确认与小车实际摆位一致！")
         logger.info(f"抽签出发区 = {start_zone} 号 → 起点 {start_pose}")
 
         perception = PerceptionPipeline(use_mock=use_mock, my_safe_zone_color=my_color)
@@ -420,10 +433,15 @@ def main():
             if current_state == RobotState.ERROR:
                 logger.error("状态机进入 ERROR，退出")
                 break
-            # 一键启动按钮在下位机(F103)：DEBUG 等待启动时轮询 EVENT,START_BUTTON → 触发 one_key_start
+            # 一键启动按钮在下位机(F103)：DEBUG 等待启动时轮询启动事件 → 触发 one_key_start。
+            # ⚠️ 必须同时认 `EVENT,START_BUTTON` 与 `EVENT,BUTTON_LED_ON`：
+            #    下位机**已处于 RUNNING** 时拨动自锁开关只发后者（它认为"已在跑"），
+            #    只认前者会导致上位机永久卡在 DEBUG（现场实际发生，详见
+            #    SerialChassis.START_REQUEST_EVENTS 的说明）。
             if current_state == RobotState.DEBUG and chassis is not None and chassis.is_open:
-                if chassis.read_button():
-                    logger.info("收到一键启动按钮事件 (EVENT,START_BUTTON)")
+                event = chassis.read_start_request()
+                if event:
+                    logger.info(f"收到一键启动请求: {event} → 进入 AUTONOMOUS")
                     sm.one_key_start()
                     continue
             if current_state == RobotState.AUTONOMOUS:

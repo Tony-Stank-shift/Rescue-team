@@ -112,7 +112,33 @@ class SerialChassis:
         return self._ser is not None and self._ser.is_open
 
     def set_start_pose(self, x_mm: float, y_mm: float, theta_rad: float) -> None:
-        """设置初始位姿（出发区对齐）。"""
+        """设置出发区位姿（出发区对齐）。**同时把当前下位机里程计记为基线。**
+
+        ⚠️ 必须记基线（2026-09-16 真机实测，代价是整场跑不起来）：
+        协议说 `START` 会清零下位机里程计，但**实测并不会** ——
+        发 START 前后 ODOM 与编码器累计值**逐位相同**：
+            前: x=+0.6823 y=+1.0959 th=-1.7043 enc=(921273,1240079)
+            后: x=+0.6823 y=+1.0959 th=-1.7043 enc=(921273,1240079)
+        而 `ChassisInterface.odom_to_upper` 把 ODOM 当**相对位移**用 →
+        不清基线的话，MCU 上电以来累积的全部位移会被当成"从出发区走的距离"
+        加到位姿上，车会以为自己已经在场外。实测自主运行日志：
+            位姿重置: (2850, 2850), heading=-90°
+            path_planner: A*: 起点 (3973, 2160) 不可通行     ← 场外约 1 米
+            navigation_pipeline: 路径规划失败 — 无可行路径
+        结果就是路径规划永远失败、车一动不动（电机本身完全正常）。
+        """
+        # 取一帧**最新**的原始里程计当基线；读不到就退用最近一次读到的
+        raw = None
+        try:
+            self.read_pose()                      # 排空缓冲 + 更新 _last_raw_odom
+        except Exception as e:
+            logger.warning(f"读取里程计基线时异常: {e}")
+        raw = getattr(self, "_last_raw_odom", None)
+        if raw is not None:
+            self._chassis.set_odom_baseline(*raw)
+        else:
+            logger.warning("未能取得里程计基线（还没读到过 ODOM）→ "
+                           "位姿可能整体偏移；请确认下位机正在发送 ODOM 遥测")
         self._chassis.set_start_pose(x_mm, y_mm, theta_rad)
 
     # ---- 发送（上行） ----
@@ -162,20 +188,68 @@ class SerialChassis:
 
     # ---- 启动流程 ----
 
-    def start_match(self, timeout: float = 0.5) -> bool:
+    #: 关键命令的应答重试策略（见 ``send_command_await`` 的说明）。
+    #: 下位机命令接收存在**秒级静默窗口**且可自愈（2026-09-16 现场实测：
+    #: 连续 2 次 PING 无应答、第 3 次才通；也曾出现连续 3 次全哑）。
+    #: 任何"只发一次 + 短超时"的关键命令都会因此被误判为故障。
+    ACK_ATTEMPTS: int = 4
+    ACK_TIMEOUT_S: float = 1.5
+    ACK_GAP_S: float = 0.25
+
+    def send_command_await(self, command: str, expect_prefix: str,
+                           *, timeout: Optional[float] = None) -> Optional[str]:
+        """发一条命令并等待指定前缀的应答，**带重试**；返回命中的应答行，全败返回 None。
+
+        为什么必须重试（现场代价极大，逐条都是真实发生过的）：
+
+        * ``start_match()`` 只发一次、超时 0.5s → 撞进静默窗口就直接把**整场比赛**
+          拒掉：``PING 未收到 PONG，连通性检查失败`` →
+          ``❌ 底盘 START 握手失败`` → ``🛑 紧急停止！原因: 底盘未启动``。
+        * BOOT 自检的连通性探测同样撞过窗口，实测"前 2 次失败、第 3 次成功"。
+
+        注意：静默窗口期间下位机**根本没收到命令**，所以等待再久也不会来应答 ——
+        必须**重发**，这也是本函数存在的意义（单纯加长超时是无效的）。
+        """
+        to = self.ACK_TIMEOUT_S if timeout is None else timeout
+        for attempt in range(1, self.ACK_ATTEMPTS + 1):
+            # 先排空残留行，避免把上一条命令迟到的应答当成本次应答
+            self.drain_lines()
+            if not self._send(command):
+                return None
+            hit = self.wait_for(expect_prefix, to)
+            if hit is not None:
+                if attempt > 1:
+                    logger.info(
+                        f"{command} 第 {attempt} 次才收到 {expect_prefix}"
+                        f"（下位机接收偶发静默，属已知现象）")
+                return hit
+            if attempt < self.ACK_ATTEMPTS:
+                logger.warning(
+                    f"{command} 第 {attempt}/{self.ACK_ATTEMPTS} 次未收到 "
+                    f"{expect_prefix}（下位机接收静默窗口）→ 重发")
+                time.sleep(self.ACK_GAP_S)
+        return None
+
+    def start_match(self, timeout: Optional[float] = None) -> bool:
         """
         启动顺序（协议第 8 节）：PING → 确认 PONG；START → 确认 ACK,START。
+
+        ⚠️ 两个握手都必须**带重试**（见 ``send_command_await``）。旧实现每种只发
+        一次、超时 0.5s，现场直接把整场比赛拒掉：
+            PING 未收到 PONG，连通性检查失败
+            ❌ 底盘 START 握手失败（PONG/ACK 超时）→ 拒绝进入自主模式
+            🛑 紧急停止！原因: 底盘未启动
         """
         if not self.is_open:
             logger.warning("串口未打开，无法启动")
             return False
-        self.send_ping()
-        if not self.wait_for("PONG", timeout):
-            logger.warning("PING 未收到 PONG，连通性检查失败")
+        to = self.ACK_TIMEOUT_S if timeout is None else timeout
+        if self.send_command_await("PING", "PONG", timeout=to) is None:
+            logger.warning(f"PING 未收到 PONG（已重试 {self.ACK_ATTEMPTS} 次）"
+                           f"，连通性检查失败")
             return False
-        self.send_start()
-        if not self.wait_for("ACK,START", timeout):
-            logger.warning("START 未收到 ACK,START")
+        if self.send_command_await("START", "ACK,START", timeout=to) is None:
+            logger.warning(f"START 未收到 ACK,START（已重试 {self.ACK_ATTEMPTS} 次）")
             return False
         logger.info("底盘启动完成（PONG + ACK,START）")
         return True
@@ -206,6 +280,25 @@ class SerialChassis:
     def rx_lines_dropped(self) -> int:
         """被丢弃的非位姿行数（T0-6 诊断：正常比赛它会持续增长，属预期）。"""
         return self._rx_lines_dropped
+
+    def drain_lines(self, max_lines: int = 512) -> int:
+        """丢弃接收缓冲里**已经到达**的整行，返回丢弃行数（不阻塞）。
+
+        用途：发一条命令并等待它的应答之前，先把上文残留的行清掉。
+        否则会出现"把上一条命令迟到的应答当成本次应答"的假通过 ——
+        现场实测到的典型表现是 BOOT 自检里
+        `电机 #1 FAIL (505ms, 超时)` + `电机 #2 PASS (3ms)`：
+        #1 的 PONG 只是晚到，被 #2 的 wait_for 立刻捡走了。
+
+        注意：本方法会丢弃排队中的遥测行（ODOM/IMU/TEL），
+        只应在"马上要发命令、且不在乎丢掉这几帧遥测"的场合使用。
+        """
+        dropped = 0
+        for _ in range(max(0, max_lines)):
+            if self._pop_line_buffered() is None:
+                break
+            dropped += 1
+        return dropped
 
     def _read_line(self) -> Optional[str]:
         """读一行原始文本（strip）；无数据/未打开返回 None。"""
@@ -290,6 +383,9 @@ class SerialChassis:
             (frame.get('encL', 0), frame.get('encR', 0)),
             (frame.get('vL', 0.0), frame.get('vR', 0.0)),
         )
+        # 记下**原始**里程计（未经 odom_to_upper 转换）：
+        # set_start_pose() 用它当基线，见那里的说明。
+        self._last_raw_odom = (frame['x_m'], frame['y_m'], frame['theta_rad'])
         return self._chassis.odom_to_upper(
             frame['x_m'], frame['y_m'], frame['theta_rad'],
         )
@@ -343,6 +439,36 @@ class SerialChassis:
         if found is None:
             text = self._read_line()
             if text and text.upper().startswith("EVENT,START_BUTTON"):
+                found = text
+        return found
+
+    #: 视为"操作员请求启动"的下位机事件（任一命中即算）。
+    #:   EVENT,START_BUTTON  —— 下位机处于 WAIT_START 时拨动自锁开关：固件走
+    #:                          `Command_EnterRunning(true)` 分支并发此事件（正常路径）。
+    #:   EVENT,BUTTON_LED_ON  —— 下位机**已处于 RUNNING** 时拨动开关：固件认为
+    #:                          "已经在跑了"，只点亮状态灯并发此事件，
+    #:                          **不发** START_BUTTON。
+    #: 为什么两个都要认：现场流程常是"先跑手动/台架测试（下位机被 START 过）→
+    #: 再启动上位机 → 操作员拨启动开关"，此时只来 BUTTON_LED_ON，而旧实现
+    #: 只认 START_BUTTON → **上位机永久卡在 DEBUG、车一动不动**
+    #: （2026-09-16 现场实际发生）。从操作员意图看，"把启动开关拨到 ON"
+    #: 就是"开始比赛"，两个事件等价，都该触发 one_key_start()。
+    START_REQUEST_EVENTS = ("EVENT,START_BUTTON", "EVENT,BUTTON_LED_ON")
+
+    def read_start_request(self) -> Optional[str]:
+        """排空缓冲后返回命中的启动请求事件行，无则 None（见 START_REQUEST_EVENTS）。"""
+        found = None
+        for _ in range(self.MAX_LINES_PER_FRAME):
+            text = self._pop_line_buffered()
+            if text is None:
+                break
+            if text.upper().startswith(self.START_REQUEST_EVENTS):
+                found = text
+            elif text:
+                self._rx_lines_dropped += 1
+        if found is None:
+            text = self._read_line()
+            if text and text.upper().startswith(self.START_REQUEST_EVENTS):
                 found = text
         return found
 

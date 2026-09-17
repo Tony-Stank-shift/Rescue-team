@@ -18,6 +18,30 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger("field_elements")
 
 
+def resolve_start_heading_deg() -> Optional[float]:
+    """从环境变量 ``START_HEADING_DEG`` 读取**现场实测的车头朝向**（度）；未设/非法返回 None。
+
+    为什么需要它：现场小车常常不是正朝场内摆的 —— 例如"斜 45° 摆在出发区
+    正方形的对角线上"。而这个角度直接决定**整张地图的旋转**：假设错多少度，
+    地图就整体转错多少度（表现为位姿跑到场外、A* 起点不可通行、车一动不动）。
+
+    ⚠️ 必须由**所有**需要出发区位姿的地方统一调用（``main.py`` 与
+    ``AutonomousState``）—— 曾经 ``AutonomousState`` 自己重算了一遍却没带
+    这个参数，把用户设好的朝向覆盖回默认值（日志里 main 显示 +45°、
+    autonomous_state 却显示 -90°），现场极难察觉。
+    """
+    import os
+    raw = os.environ.get("START_HEADING_DEG", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        logger.error(f"START_HEADING_DEG={raw!r} 不是数字 → 忽略，"
+                     f"改用默认朝向（朝场地内侧）")
+        return None
+
+
 # ============================================================
 # 场地元素枚举
 # ============================================================
@@ -285,7 +309,9 @@ class StandardFieldLayout:
         return None
 
     def get_start_pose(self, zone_id: int,
-                       heading_mode: str = "inward") -> Optional[Tuple[float, float, float]]:
+                       heading_mode: str = "inward",
+                       heading_deg: Optional[float] = None
+                       ) -> Optional[Tuple[float, float, float]]:
         """
         出发区位姿 (x_mm, y_mm, theta_rad) —— 全场坐标系的唯一来源。
 
@@ -298,6 +324,24 @@ class StandardFieldLayout:
                 "inward"（默认）—— 朝场地内侧（1/2 号区朝 -Y，3/4 号区朝 +Y），
                     不依赖安全区颜色，简单可预测；
                 "center"—— 朝场地中心 (1500,1500) 方向。
+            heading_deg: **现场实测的车头朝向（度；场地坐标系，逆时针为正，0=+X）**。
+                给定时**优先于 heading_mode**。
+
+                ⚠️ 为什么需要它（2026-09-16 现场踩到，代价是整场跑不起来）：
+                现场小车常常**不是正朝场内**摆的 —— 例如"斜 45° 摆在出发区
+                正方形的对角线上"。而 `ChassisInterface.odom_to_upper()` 是拿
+                **这里的 theta** 去旋转里程计位移的：**车头朝向假设错多少度，
+                整张地图就整体转错多少度**。
+                实测症状：开场退避直线走了 1.5m，软件算出的位移
+                `(1513, -369)` —— **大小完全正确（1557mm ≈ 1.5m），方向错了**
+                → 位姿跑到场外 `(4363, 2481)` → A* 起点不可通行 → 车不动。
+                （里程计本身经核对是正确的：位移方向与 ODOM 里的 θ 一致到 5.6° 内。）
+
+                取值参考（2 号区，(2850,2850)）：
+                    -90°  车头正对场地内侧（-Y）
+                    -135° 车头朝场地中心 (1500,1500) 方向（对角线）
+                    +45°  车头朝出发区外侧角落（此时"后退"才是朝场地中心）
+                现场务必用卷尺/场地边线核对方位后再填。
         Returns:
             (x, y, theta)；区号非法返回 None
         """
@@ -305,6 +349,9 @@ class StandardFieldLayout:
         if elem is None:
             return None
         cx, cy = elem.region.center
+
+        if heading_deg is not None:
+            return (cx, cy, math.radians(float(heading_deg)))
 
         if heading_mode == "center":
             import math as _m

@@ -369,14 +369,13 @@ class SerialServoLift(AbstractSleeveLift):
         return self._state
 
     def lower(self, target_positions: Optional[dict] = None) -> bool:
-        """发 SERVO,LOWER 套住目标（等待 ACK）。"""
+        """发 SERVO,LOWER 套住目标（等待 ACK，带重试）。"""
         if target_positions is not None:
             self._target_positions = target_positions
 
-        if not self._chassis.send_servo("LOWER"):
-            logger.warning("SERVO,LOWER 发送失败")
+        if not self._servo_await("LOWER", "ACK,SERVO,LOWER"):
+            logger.warning("SERVO,LOWER 未确认（重发后仍无 ACK）")
             return False
-        self._chassis.wait_for("ACK,SERVO,LOWER", 0.5)
         time.sleep(self._move_time_s)
 
         self._state.action = SleeveAction.LOWERED
@@ -406,15 +405,28 @@ class SerialServoLift(AbstractSleeveLift):
         logger.error("套取失败（%d 次重试后）", max_retries)
         return False
 
+    def _servo_await(self, action: str, expect_prefix: str) -> bool:
+        """发一个 SERVO 动作并等待其 ACK，**带重试**。
+
+        为什么必须重试：下位机串口命令接收存在秒级静默窗口（可自愈），
+        旧实现"发一次 + `wait_for(..., 0.5)`"会把它误判成套取/释放失败 ——
+        现场表现是"套取总是失败、反复抬爪后退"，看起来像机构问题，实为通信问题。
+        见 ``SerialChassis.send_command_await``。
+        """
+        await_fn = getattr(self._chassis, "send_command_await", None)
+        if await_fn is None:
+            # 兼容没有该接口的 chassis（旧实现/Mock）：退化为发送即认为成功
+            return bool(self._chassis.send_servo(action))
+        return await_fn(f"SERVO,{action.upper()}", expect_prefix) is not None
+
     def raise_up(self) -> bool:
-        """发 SERVO,RAISE 抬起释放目标。"""
+        """发 SERVO,RAISE 抬起释放目标（等待 ACK，带重试）。"""
         if self._state.action == SleeveAction.RAISED:
             return True
 
-        if not self._chassis.send_servo("RAISE"):
-            logger.warning("SERVO,RAISE 发送失败")
+        if not self._servo_await("RAISE", "ACK,SERVO,RAISE"):
+            logger.warning("SERVO,RAISE 未确认（重发后仍无 ACK）")
             return False
-        self._chassis.wait_for("ACK,SERVO,RAISE", 0.5)
         time.sleep(self._move_time_s)
 
         released = self._state.holding_ids.copy()

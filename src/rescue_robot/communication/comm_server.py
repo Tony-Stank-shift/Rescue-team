@@ -21,6 +21,13 @@ logger = logging.getLogger("comm_server")
 class AbstractCommServer:
     """通信服务器抽象基类"""
 
+    #: 是否需要周期性保活（keepalive ping）。
+    #: 真实 WebSocket 服务器需要（连接空闲会被对端/中间设备掐断）；
+    #: Mock 控制台服务器**不需要** —— 之前它 client_count 恒为 1，
+    #: 导致 CommManager 每 STATUS_BROADCAST_INTERVAL_S 发一条 ping 并打 INFO 日志，
+    #: 现场真机模式下把控制台刷得看不见有用信息（实测 2 条/秒）。
+    keepalive_required: bool = True
+
     def start(self, host: str = "0.0.0.0", port: int = 8765) -> bool:
         raise NotImplementedError
 
@@ -54,6 +61,10 @@ class MockCommServer(AbstractCommServer):
     """
     Mock 通信服务器：控制台输入输出模拟。
 
+    ⚠️ 不参与保活 ping（``keepalive_required = False``）：
+    本服务器没有真实连接可维持，其 ``client_count`` 恒为 1，
+    若按通用逻辑发保活会在真机控制台刷屏（实测 2 条/秒）。
+
     用法：
       server = MockCommServer()
       server.start()
@@ -67,6 +78,9 @@ class MockCommServer(AbstractCommServer):
         self._input_thread: Optional[threading.Thread] = None
         self._sent_count = 0
         self._recv_count = 0
+
+    #: Mock 无可维持的连接 → 不参与保活（见类文档）
+    keepalive_required = False
 
     def start(self, host: str = "", port: int = 0) -> bool:
         self._running = True

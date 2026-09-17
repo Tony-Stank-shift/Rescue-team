@@ -54,6 +54,13 @@ class AutonomousState:
     WATCHDOG_SURVIVAL_S = 13.0    # 无动作 → 保命绕圈
     WATCHDOG_HARD_LIMIT_S = 15.0  # 最后防线：仍不淘汰，仅持续保命运动
 
+    # ── 开场退避（现场摆位需要，2026-09-16 加入，YAML 可调）──
+    # 现场车身在出发区里**斜 45°**（两差速轮靠近减速带、万向轮远离），
+    # 开局先直线后退一段即可整体脱出。做成开场动作后"一条启动命令全自动"。
+    # 负值 = 后退；0 = 关闭（默认，保持与仿真/旧行为一致）。
+    STARTUP_BACKUP_MM_S: float = 0.0     # 例：-300.0 = 以 30cm/s 后退
+    STARTUP_BACKUP_S: float = 5.0        # 退避时长（秒）
+
     # ── "有没有动作"的判据：里程计**实际位移**，不是下发速度 ──
     # 旧实现看 `abs(cmd.linear) > 10`：轮子卡在围栏上/打滑空转时指令一直是几百 mm/s，
     # 看门狗永远不触发 → 车原地耗到比赛时间结束（整场 0 分）。
@@ -105,9 +112,19 @@ class AutonomousState:
         self._camera = camera  # cv2.VideoCapture 实例（真机视觉读帧）
 
         # 出发区位姿：坐标系唯一来源（现场抽签决定 1~4 号区）
-        from ..perception.field_elements import StandardFieldLayout
+        # ⚠️ 必须带上 START_HEADING_DEG：现场小车常不是正朝场内摆的
+        #    （例：斜 45° 摆在出发区对角线上）。
+        #    曾经这里漏传 → main.py 里设好的朝向被本行**覆盖回默认的"朝场地内侧"**，
+        #    实测日志自相矛盾：
+        #       main: 起点 (2850, 2850, 0.785) ← +45°（用户设的）
+        #       autonomous_state: 朝向=-90°   ← 被这里覆盖
+        #    → 位姿整体转错 → A* 起点跑到场外 → 车一动不动。
+        from ..perception.field_elements import (
+            StandardFieldLayout, resolve_start_heading_deg,
+        )
         self._start_zone = int(start_zone)
-        _pose = StandardFieldLayout().get_start_pose(self._start_zone) \
+        _pose = StandardFieldLayout().get_start_pose(
+            self._start_zone, heading_deg=resolve_start_heading_deg()) \
             or (150.0, 150.0, 1.5707963267948966)
         self._start_pose: tuple = _pose
 
@@ -220,6 +237,12 @@ class AutonomousState:
                 return
             logger.info("底盘连接+启动: ✅ 成功（PONG + ACK,START）")
 
+        # ── 开场退避（现场摆位需要，2026-09-16 加入）──
+        # 现场摆位：车身在出发区里**斜 45°**（两差速轮靠近减速带、万向轮远离），
+        # 开局先直线后退固定时间即可整体脱出出发区/减速带，省掉人工干预，
+        # 让"发一条启动命令 → 自己进场地 → 继续自主"一次完成。
+        self._run_startup_backup()
+
         # 延迟启动（让裁判离开场地）
         logger.info(f"等待 {timing.POST_START_DELAY_MS}ms 后开始运行...")
         time.sleep(timing.POST_START_DELAY_MS / 1000)
@@ -243,6 +266,56 @@ class AutonomousState:
         )
         self._loop_thread.start()
         logger.info("主循环已启动")
+
+    def _run_startup_backup(self) -> None:
+        """开场直线退避：把车从出发区/减速带退到场内，然后自动转入正常自主。
+
+        为什么做进程序里而不是每次手动发 VEL：
+        现场摆位是"车身在出发区里斜 45°、两差速轮靠近减速带、万向轮远离"，
+        每次开赛都要先退一段才能正常进场地。做成开场动作后，
+        **一条启动命令即可全自动**（按实体启动开关 → 退避 → 自主导航）。
+
+        配置：``match.startup_backup_mm_s``（负值=后退，0=关闭）、
+        ``match.startup_backup_s``（时长）。默认 0（关闭），现场按需开。
+
+        注意：
+          * 退避期间以 **50Hz** 持续发 VEL（下位机速度看门狗 300ms 保持 /
+            800ms 停车，发慢了会被判超时停车）。
+          * 退避产生的位移由里程计自然记入，位姿会跟着更新，
+            不需要额外修正；退避结束后主循环接着跑即可。
+        """
+        speed = float(getattr(self, "STARTUP_BACKUP_MM_S", 0.0))
+        duration = float(getattr(self, "STARTUP_BACKUP_S", 5.0))
+        if speed == 0.0 or duration <= 0.0:
+            logger.info("开场退避：已关闭（startup_backup_mm_s=0）")
+            return
+        if self._chassis is None or not self._chassis.is_open:
+            logger.warning("开场退避：底盘不可用，跳过")
+            return
+
+        logger.info(f"🔄 开场退避：{speed:+.0f} mm/s × {duration:.1f}s "
+                    f"（≈{abs(speed) * duration / 1000:.2f} m，把车带出出发区/减速带）")
+        period = 1.0 / 50.0
+        t0 = time.time()
+        sent = 0
+        while time.time() - t0 < duration:
+            self._chassis.send_velocity(speed, 0.0)
+            sent += 1
+            # 排空接收缓冲，避免 80 行/秒遥测积压（同时顺带刷新位姿）
+            try:
+                pose = self._chassis.read_pose()
+                if pose is not None:
+                    self._pose = pose
+            except Exception:
+                pass
+            dt = period - (time.time() - t0 - (sent - 1) * period)
+            if dt > 0:
+                time.sleep(dt)
+
+        # 收尾：显式停车（协议 VEL,0,0 + STOP）
+        self._chassis.send_velocity(0.0, 0.0)
+        self._chassis.send_stop()
+        logger.info(f"✅ 开场退避完成（{sent} 帧 VEL）→ 转入自主导航")
 
     def _apply_start_pose(self) -> None:
         """

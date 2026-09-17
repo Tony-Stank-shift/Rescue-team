@@ -79,6 +79,9 @@ _ROBOT_SCHEMA = {
     "robot.match.nav_timeout_s": ((int, float), lambda v: 1 <= v <= 120),
     "robot.match.grip_timeout_s": ((int, float), lambda v: 1 <= v <= 120),
     "robot.match.transport_timeout_s": ((int, float), lambda v: 1 <= v <= 120),
+    # 开场退避：速度可为负（后退），0 = 关闭；时长 0~30s
+    "robot.match.startup_backup_mm_s": ((int, float), lambda v: -850 <= v <= 850),
+    "robot.match.startup_backup_s": ((int, float), lambda v: 0 <= v <= 30),
     # ---- 降级 / 看门狗（现场排障常改）----
     "robot.fallback.max_retries": (int, lambda v: 0 <= v <= 10),
     "robot.fallback.watchdog_warn_s": ((int, float), lambda v: 1 <= v <= 120),
@@ -533,6 +536,11 @@ class MatchConfig:
     nav_timeout_s: int = 10
     grip_timeout_s: int = 3
     transport_timeout_s: int = 15
+    # 开场退避：进 AUTONOMOUS 后、主循环开始前，先直线走一段把车带出出发区/减速带。
+    # 现场车身在出发区里斜 45° 摆位，需先退一段才能正常进场地。
+    # **负值 = 后退**；0 = 关闭（默认，保持与仿真/旧行为一致）。
+    startup_backup_mm_s: float = 0.0
+    startup_backup_s: float = 5.0
 
 
 @dataclass

@@ -195,12 +195,15 @@ class CommManager:
         self._broadcast_thread.start()
 
     def _broadcast_loop(self) -> None:
-        """定期广播状态"""
+        """定期广播状态（仅真实服务器需要保活心跳）。"""
         while self._broadcast_running:
             time.sleep(self.STATUS_BROADCAST_INTERVAL_S)
-            # 由外部调用 send_status 来控制广播内容
-            # 这里只做保活 ping
-            if self._server.client_count > 0:
+            # 由外部调用 send_status 来控制广播内容，这里只做保活 ping。
+            # ⚠️ 只有需要保活的服务器（真实 WebSocket）才发：
+            #    Mock 控制台服务器 keepalive_required=False 且 client_count 恒为 1，
+            #    按旧逻辑会在真机控制台每 0.5s 刷一条 "[发送] ping"（实测刷屏）。
+            if (self._server.client_count > 0
+                    and getattr(self._server, "keepalive_required", True)):
                 self.send(Message(type=MessageType.PING))
 
     # ---- 配置管理 ----

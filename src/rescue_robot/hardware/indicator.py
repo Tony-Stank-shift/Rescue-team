@@ -1,11 +1,11 @@
 """
 indicator.py —— 状态指示器
 
-通过 LED 和蜂鸣器向外界传达机器人当前状态：
+通过 LED 向外界传达机器人当前状态（**本车未装蜂鸣器**，故不驱动任何蜂鸣器）：
   - BOOT:        绿色 LED 慢闪（500ms 间隔）
   - DEBUG:       绿色 LED 常亮
   - AUTONOMOUS:  绿色 LED 快闪（200ms 间隔）
-  - ERROR:       红色 LED 快闪 + 蜂鸣器间歇鸣叫
+  - ERROR:       红色 LED 快闪
   - OFF:         所有 LED 关闭
 """
 
@@ -25,7 +25,7 @@ class IndicatorSignal(Enum):
     BOOT_BLINK = auto()             # 绿 LED 慢闪（自检中）
     DEBUG_STEADY = auto()           # 绿 LED 常亮（等待启动）
     AUTONOMOUS_FAST_BLINK = auto()  # 绿 LED 快闪（全自主运行）
-    ERROR = auto()                  # 红 LED 快闪 + 蜂鸣器
+    ERROR = auto()                  # 红 LED 快闪
 
 
 class AbstractIndicator:
@@ -52,7 +52,7 @@ class MockIndicator(AbstractIndicator):
         IndicatorSignal.BOOT_BLINK:            "🔵 指示灯: 绿 LED 慢闪 (自检中…)",
         IndicatorSignal.DEBUG_STEADY:          "🟢 指示灯: 绿 LED 常亮 (等待启动)",
         IndicatorSignal.AUTONOMOUS_FAST_BLINK: "🔴 指示灯: 绿 LED 快闪 (全自主运行!!)",
-        IndicatorSignal.ERROR:                 "🚨 指示灯: 红 LED 快闪 + 蜂鸣器 (错误!!)",
+        IndicatorSignal.ERROR:                 "🚨 指示灯: 红 LED 快闪 (错误!!)",
     }
 
     def signal(self, signal_type: IndicatorSignal) -> None:
@@ -71,16 +71,16 @@ class LEDIndicator(AbstractIndicator):
     使用单独的线程驱动 LED 闪烁，避免阻塞主状态机。
     """
 
-    def __init__(self, green_pin: int, red_pin: int, buzzer_pin: int | None = None):
+    def __init__(self, green_pin: int, red_pin: int):
         """
         Args:
             green_pin: 绿色 LED BCM 引脚
             red_pin: 红色 LED BCM 引脚
-            buzzer_pin: 蜂鸣器 BCM 引脚（可选）
+
+        注：本车**未装蜂鸣器**，故不再提供 buzzer_pin（2026-09-16 现场确认）。
         """
         self._green_pin = green_pin
         self._red_pin = red_pin
-        self._buzzer_pin = buzzer_pin
 
         # 延迟导入
         try:
@@ -93,8 +93,6 @@ class LEDIndicator(AbstractIndicator):
         self._GPIO.setmode(GPIO.BCM)
         self._GPIO.setup(self._green_pin, GPIO.OUT, initial=GPIO.LOW)
         self._GPIO.setup(self._red_pin, GPIO.OUT, initial=GPIO.LOW)
-        if self._buzzer_pin is not None:
-            self._GPIO.setup(self._buzzer_pin, GPIO.OUT, initial=GPIO.LOW)
 
         # 闪烁控制
         self._current_signal = IndicatorSignal.OFF
@@ -118,13 +116,11 @@ class LEDIndicator(AbstractIndicator):
         if signal_type == IndicatorSignal.OFF:
             self._set_green(False)
             self._set_red(False)
-            self._set_buzzer(False)
             return
 
         # 常亮模式
         if signal_type == IndicatorSignal.DEBUG_STEADY:
             self._set_red(False)
-            self._set_buzzer(False)
             self._set_green(True)
             return
 
@@ -164,7 +160,6 @@ class LEDIndicator(AbstractIndicator):
             while not self._stop_event.is_set():
                 self._set_green(False)
                 self._set_red(state)
-                self._set_buzzer(state)
                 state = not state
                 time.sleep(interval)
 
@@ -174,16 +169,10 @@ class LEDIndicator(AbstractIndicator):
     def _set_red(self, on: bool) -> None:
         self._GPIO.output(self._red_pin, self._GPIO.HIGH if on else self._GPIO.LOW)
 
-    def _set_buzzer(self, on: bool) -> None:
-        if self._buzzer_pin is not None:
-            self._GPIO.output(self._buzzer_pin, self._GPIO.HIGH if on else self._GPIO.LOW)
-
     def cleanup(self) -> None:
         self._stop_event.set()
         if self._blink_thread and self._blink_thread.is_alive():
             self._blink_thread.join(timeout=1.0)
         self._GPIO.output(self._green_pin, self._GPIO.LOW)
         self._GPIO.output(self._red_pin, self._GPIO.LOW)
-        if self._buzzer_pin is not None:
-            self._GPIO.output(self._buzzer_pin, self._GPIO.LOW)
         self._GPIO.cleanup()

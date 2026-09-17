@@ -31,7 +31,7 @@ class Pin(IntEnum):
     BUTTON_START = 0        # 下位机 PB9 (START_BTN 一键启动)
     LED_GREEN = 1           # 下位机 PC13 (STATUS_LED)
     LED_RED = 2             # 预留
-    BUZZER = 3              # 预留（无）
+    BUZZER = 3              # ⚠️ 本车未装蜂鸣器（2026-09-16 现场确认）；编号保留以免改动引脚映射，勿接线
     SERVO_PWM = 4           # 下位机 PB6 (SERVO_PWM 舵机)
     MPU6050_INT = 5         # 下位机 PB5 (MPU6050_INT)
     MPU6050_SCL = 6         # 下位机 PB10 (MPU6050_SCL, I2C2)
@@ -312,6 +312,13 @@ def apply_robot_config(cfg) -> None:
         # 时间紧迫阈值同时约束目标选择器
         from .decision.target_selector import TargetSelector
         TargetSelector.TIME_PRESSURE_S = float(m.time_pressure_s)
+        # 开场退避（现场摆位需要）：进 AUTONOMOUS 后先直线退一段再开始自主。
+        # 负值 = 后退，0 = 关闭。见 AutonomousState._run_startup_backup。
+        from .states.autonomous_state import AutonomousState
+        AutonomousState.STARTUP_BACKUP_MM_S = float(
+            getattr(m, "startup_backup_mm_s", 0.0) or 0.0)
+        AutonomousState.STARTUP_BACKUP_S = float(
+            getattr(m, "startup_backup_s", 5.0) or 5.0)
 
     fb = getattr(cfg, "fallback", None)
     if fb is not None:
