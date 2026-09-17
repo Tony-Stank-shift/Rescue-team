@@ -14,7 +14,16 @@ EXPECT = {
     "IMU": (50.0, 0.45),
     "TEL": (10.0, 0.55),
 }
-EXPECT_FIELDS = {"ODOM": 8, "IMU": 10, "TEL": 10}
+EXPECT_FIELDS = {"ODOM": 8, "IMU": 10, "TEL": 8}
+# ⚠️ 2026-09-17 修：`TEL` 原来写的是 **10** —— 从 `IMU` 抄来的错值。
+#    协议 `chassis_serial_protocol.md:448` 定义：
+#        TEL,tick_ms,left_target_rpm,left_actual_rpm,right_target_rpm,
+#            right_actual_rpm,left_pwm,right_pwm
+#    即 `TEL` + 7 个值 = **8 个逗号段**；固件 `telemetry.c` 的格式串
+#    `"TEL,%lu,%d,%s%lu.%03lu,%d,%s%lu.%03lu,%d,%d"` 数出来也正是 8 段。
+#    后果：真机自检**误报**"TEL 字段数 8（期望 10）"，让人去追一个不存在的固件问题。
+#    → 新增 `verify_selftest_truthfulness.py`：直接从固件格式串推字段数并与本表比对，
+#      杜绝再靠手抄。
 
 
 @register(MODULE, TITLE)

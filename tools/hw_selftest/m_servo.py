@@ -26,9 +26,32 @@ def run(ctx):
         return err
 
     def send(cmd: str, wait: float = 0.5):
+        """发一条 SERVO 命令，返回**第一条** ACK/ERR 应答；1.3s 内无应答返回 None。
+
+        ⚠️ 2026-09-17 修：旧实现是
+            `sc.wait_for("ACK,SERVO", 1.0) or sc.wait_for("ERR,", 0.3)`
+        而 `wait_for` 是**边读边丢弃**不匹配的行（见 `SerialChassis.wait_for`）。
+        于是当固件**正确**回了 `ERR,SERVO_ANGLE` 时，第一个 wait_for 会把这个 ERR 行
+        读掉并丢进垃圾桶，第二个 wait_for 在缓冲里再也找不到它 → 返回 None
+        → 自检误报"越界角度 71 未被拒绝（实际 None）"。
+
+        实测就是这么误报的：报的是"实际 **None**"（什么都没收到），而不是
+        "收到了错误的 ACK" —— 这两个含义完全不同，前者一眼就该怀疑读取逻辑。
+        固件侧其实是对的（`command.c` 里 71 > `SERVO_MAX_ANGLE_DEG=70` → 回 ERR）。
+
+        现在改成**一次遍历、ACK 与 ERR 都认**，不再有"读掉再找"的窗口。
+        """
         sc._send(cmd)
         time.sleep(wait)
-        return sc.wait_for("ACK,SERVO", 1.0) or sc.wait_for("ERR,", 0.3)
+        deadline = time.time() + 1.3
+        while time.time() < deadline:
+            line = sc._read_line()
+            if not line:
+                continue
+            up = line.upper()
+            if up.startswith("ACK,SERVO") or up.startswith("ERR,"):
+                return line
+        return None
 
     # 动作命令
     for cmd, want in (("SERVO,RAISE", "ACK,SERVO,RAISE"),

@@ -93,7 +93,7 @@ start_button → servo → odometry → motors → velocity → camera → visio
 | `transport` | 转运状态机全流程（Mock 夹爪）：APPROACHING→CAPTURING→TRANSPORTING→PLACING→COMPLETE | 流程走完 + 显式停车回调被调用 + 无 VIOLATION | 卡在中间阶段：看到点阈值/推入步骤；VIOLATION：载规则或投放判定 |
 | `accounting` | **S-40 载荷台账一致性**：计划≠实装必须被区分（台账/位姿复核/持有不抬爪，见 §10.2） | 台账数=实装数、只记真正套住的那个、隔 >150mm 不记账 | 台账虚高 → 分**虚高**；查 `CAPTURING` 分支的 `_capture_index`/`CAPTURE_RADIUS_MM`/`_captured` |
 | `serial` | 串口能否打开 + `PING→PONG` + `START→ACK,START` | 两者都收到 | 见 §4 串口四分类；能开但无 PONG → 下位机没跑/只接单向/未共地 |
-| `telemetry` | ODOM 8 字段@20Hz、IMU 10 字段@50Hz、TEL 字段数、数值合理性（az≈1000mg）、解析器一致性 | 帧前缀/字段数/频率/数值都对 | 见 §4；0 行：下位机没发数据或波特率不符 |
+| `telemetry` | ODOM **8** 字段@20Hz、IMU **10** 字段@50Hz、TEL **8** 字段、数值合理性（az≈1000mg）、解析器一致性 | 帧前缀/字段数/频率/数值都对 | 见 §4；0 行：下位机没发数据或波特率不符 |
 | `start_button` | 一键启动：软件层 `read_button` 是否认得 `EVENT,START_BUTTON`；硬件层需 `HW_SELFTEST_INTERACTIVE=1` 人工按键 | 软件层识别成功 | 识别不了 → 现场按按钮不会进 AUTONOMOUS（查 `SerialChassis.read_button` 匹配前缀） |
 | `servo` | RAISE/LOWER/HOLD 各自 ACK；ANGLE 0/35/70 全部接受；71/180/-1 必须回 `ERR,SERVO_ANGLE` | 动作 ACK 正确 + 越界被拒 | 无 ACK：固件未实现或未 `START`；越界没被拒 → 有把舵机顶到限位的风险。角度语义：**0°=下压套住、70°=抬起释放** |
 | `odometry` | 坐标换算（前进 +Y / 左移 −X / theta 累加）+ 实际运动符号 | 换算正确；`--yes-motion` 时前进 Δx>0、左转 Δθ>0、右转 Δθ<0 | 符号反 → 左右编码器 A/B 相接反或左右轮定义互换 |
@@ -148,6 +148,29 @@ start_button → servo → odometry → motors → velocity → camera → visio
 - `transport` FAIL → 看卡在哪个阶段，对照 `TransportPhase` 的转移条件。
 
 ---
+
+## 4.5 ⚠️ 自检**自己也会错** —— 报 FAIL 时先怀疑自检
+
+2026-09-17 真机自检报了 3 个 FAIL，其中 **2 个是自检脚本自己的 bug**，固件没问题。
+两次都差点让人去追一个不存在的固件缺陷：
+
+| 报错 | 真相 | 根因 |
+|---|---|---|
+| `TEL 字段数 8（期望 10）` | **8 才是对的** | `EXPECT_FIELDS["TEL"]` 从 `IMU` **抄错**成 10。协议与固件都是 `TEL`+7 值=8 段 |
+| `越界角度 71 未被拒绝（实际 None）` | **固件正确回了 `ERR,SERVO_ANGLE`** | 助手写成 `wait_for("ACK,SERVO",1.0) or wait_for("ERR,",0.3)`，而 `wait_for` **边读边丢弃**不匹配行 → 第一个 wait_for 把 ERR 行读掉丢了 → None |
+
+**识别信号**：报的"实际值"是 **None / 空 / 0** 而不是"收到了错误的值" ——
+这通常意味着**读取逻辑**出了问题，而不是对端没做对。
+
+**已加的护栏**（`tools/fix_verifiers/verify_selftest_truthfulness.py`，已并入 `run_all`）：
+- 遥测期望字段数**直接从固件 `telemetry.c` 的格式串推导**再比对（不再靠手抄）；
+- 协议文档里的字段数也与固件交叉核对；
+- 舵机助手必须"一次遍历、ACK/ERR 都认"，并用**假串口流**做行为验证
+  （喂一条只含 `ERR,SERVO_ANGLE` 的流，旧写法必须得到 None、新写法必须读到它）；
+- 自检的 `MAX_ANGLE` 必须等于固件 `SERVO_MAX_ANGLE_DEG`。
+
+> 顺带确认：固件的越界分支是**先 `return` 再驱动舵机**，所以「只测越界角度」
+> 这一项本身**不会让机构动**（要动机构的是 0/35/70 那几项）。
 
 ## 5. 安全注意（动电机之前必看）
 

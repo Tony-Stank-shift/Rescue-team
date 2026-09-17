@@ -24,6 +24,7 @@ SCRIPTS = [
     ("SEARCH 搜索覆盖：中央优先 + 全场蛇形不碾物体", "verify_search_coverage.py"),
     ("PICKUP 套取链：停位/近距爬行/看门狗算转动/计时复位", "verify_pickup_chain.py"),
     ("SAFETY 自检闸门：--mock 不得碰硬件 / 动作模块必须挂闸门", "verify_selftest_safety.py"),
+    ("TRUTH  自检不得说谎：遥测字段数取自固件 / 舵机助手不吃 ERR", "verify_selftest_truthfulness.py"),
 ]
 
 
