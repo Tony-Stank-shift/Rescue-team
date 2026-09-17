@@ -272,10 +272,56 @@ done
 
 ### 1.7 一键启动链路（进 AUTONOMOUS 的唯一途径）
 
+> 🔴 **2026-09-16 真机联调修正**：本节原描述只认 `EVENT,START_BUTTON`，
+> 但**下位机已处于 `RUNNING` 时拨开关只发 `EVENT,BUTTON_LED_ON`**（固件认为"已经在跑了"），
+> 现场表现为"按启动开关毫无反应、永久卡在 DEBUG"。
+> 现已 **两个事件都触发启动**（`read_start_request()`）。
+> **完整排查记录见 `docs/audit/REAL_MACHINE_DEBUG_20260916.md`（9 个问题的现象/证据/根因/修复）。**
+>
+> ⚠️ 另有一个残余坑：若**开机时 `ON` 自锁开关已经是 ON**，固件 `Command_Init` 直接取当前值
+> → 永不产生边沿 → 不发任何事件。**现场规避：开机前确认开关在 OFF。**
+>
+> 🆕 新增两个启动参数（见 §1.7.1）：
+> `START_HEADING_DEG`（声明真实车头朝向）与 `match.startup_backup_*`（开场自动后退出场）。
+
+#### 1.7.1 出发区摆位与开场退避（现场必看）
+
+**现场摆位**：小车**斜 45° 摆在出发区正方形的对角线上**（两差速轮靠近减速带、万向轮远离）。
+
+**启动命令**（`START_HEADING_DEG` **不可省**）：
+```bash
+cd ~/rescue && TEAM_COLOR=red START_ZONE=2 START_HEADING_DEG=45 ./run.sh
+```
+
+`START_HEADING_DEG` 是**车头在场地坐标系的朝向（度，逆时针为正）**，
+它直接决定整张地图的旋转——**假设错多少度，地图就整体转错多少度**，
+症状是"位姿跑到场外 + `A*: 起点 不可通行` + 车一动不动"。
+
+2 号区（起点 2850,2850）取值参考：
+| 值 | 含义 |
+|---|---|
+| `-90°` | 车头正对场地内侧（-Y）—— 软件默认 |
+| `-135°` | 车头朝场地中心 (1500,1500)（对角线朝里） |
+| **`+45°`** | **车头朝出发区外侧角落** —— 此时"后退"才朝场地中心（本轮实测确认值） |
+
+**开场退避**：进 AUTONOMOUS 后自动直线退一段把车带出出发区/减速带，
+无需人工补发指令。配置在 `config/robot.default.yaml`：
+```yaml
+match:
+  startup_backup_mm_s: -300.0   # 负值=后退；0=关闭
+  startup_backup_s: 5.0
+```
+
+**启动后必须核对这两行是同一个角度**（曾经不一致 → 定位全错）：
+```
+main: 抽签出发区 = 2 号 → 起点 (2850.0, 2850.0, 0.785...)
+autonomous_state: 坐标系初始化：出发区 2 号，起点=(2850, 2850)mm，朝向=+45°
+```
+
 代码路径（**这条链路是分开的两段，必须都通**）：
 
-1. 下位机按钮按下 → F103 发 `EVENT,START_BUTTON`（`serial_chassis.py:257-258`）。
-2. 上位机主线程 0.5s 轮询一次读串口（`main.py:247-257`）→ `chassis.read_button()` 命中 → `sm.one_key_start()`。
+1. 下位机按钮按下 → F103 发 `EVENT,START_BUTTON`（下位机已 `RUNNING` 时改为发 `EVENT,BUTTON_LED_ON`）。
+2. 上位机主线程 0.5s 轮询一次读串口 → `chassis.read_start_request()` 命中**任一**事件 → `sm.one_key_start()`。
 3. `one_key_start()` 置锁 + `DEBUG → AUTONOMOUS`（`state_machine.py:184-203`，不可逆）。
 4. `AutonomousState.on_enter()`：示波灯快闪 → 锁外部输入 → `start_match()` → `start_match()` 串口握手（PING→PONG / START→ACK,START）→ 等 `POST_START_DELAY_MS=1000ms` → 起主循环线程（`autonomous_state.py:137-177`）。
 
