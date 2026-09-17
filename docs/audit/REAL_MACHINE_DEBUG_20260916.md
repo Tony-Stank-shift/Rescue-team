@@ -208,7 +208,7 @@ cd ~/rescue && TEAM_COLOR=red START_ZONE=2 START_HEADING_DEG=45 ./run.sh
 | 5 | 直行会拐弯 | 实测直行 5 秒 Δθ 达 5.8~24°（走弧线），影响导航落点精度，原因未查 |
 | 6 | 视觉误报 | 真实地面实测：绿色物体被分类成「普通物资（初赛）绿色正方体」→ 会让首趟做废（首趟必须且仅 1 个普通物资）。待加面积上限 + 形状合理性校验 |
 | 7 | RDK 系统时间未对时 | 显示 2000-01-01，日志时间戳失真 |
-| 8 | `run.sh` 写死 `SKIP_CAMERA_CHECK=1` | 相机坏也放行 → 感知降级 Mock → 车追假目标。现场建议去掉 |
+| 8 | `run.sh` 写死 `SKIP_CAMERA_CHECK=1` | 相机坏也放行 → 感知降级 Mock → 车追假目标。现场建议去掉；**但必须先确认去掉后自检不会卡**（它当初就是为了绕开这个才写死的），改前单独跑一次 `SKIP_CAMERA_CHECK=0` 试 |
 
 ---
 
@@ -241,3 +241,45 @@ cd ~/rescue && TEAM_COLOR=red START_ZONE=2 START_HEADING_DEG=45 ./run.sh
 
 3. **加接口时要全局搜索同类计算点。** 【上位机-3】就是加 `START_HEADING_DEG` 时
    漏了 `AutonomousState` 里那次重复计算。**重复的"唯一来源"就不是唯一来源。**
+
+---
+
+## 8. 仓库 ↔ RDK 同步核查（2026-09-17）
+
+**核查方法**：两侧各自 `find -type f`（排除 `.git` / `__pycache__` / `*.pyc` /
+`firmware/{Drivers,build}` / `.venv` / `*.log`）→ `LC_ALL=C sort` → `md5sum`，
+再 `diff` 两份清单。**不是抽查，是全量逐字节**。
+（`LC_ALL=C` 是必需的：默认 locale 下两侧排序规则可能不同，会造成假差异。）
+
+**结果**：`src/ config/ tools/ scripts/ docs/ tests/ firmware/` 与根目录文档
+**全部逐字节一致**，差异只有 3 处：
+
+| # | 差异 | 判定 | 处置 |
+|---|---|---|---|
+| 1 | `.agent-teams/**` 仅本地有（10 个文件） | ✅ **本该如此**，是本地 AgentTeams 协作运行时状态，已被 `.gitignore` 忽略（`git ls-files` 确认 0 个入库） | 不同步 |
+| 2 | `.gitignore` 仅本地有 | ⚠️ RDK 上**根本没有这个文件**（不是内容不同） | 已 rsync 过去，md5 一致 |
+| 3 | **`run.sh` 仅 RDK 有** | 🔴 **真缺陷**（详见下） | 已按字节取回仓库并入库 |
+
+### 🔴 关于 `run.sh`：文档在教人执行一个仓库里不存在的文件
+
+`run.sh` 是**实际启动入口**（17 行：设 `RUN_MODE/CHASSIS_PORT/CAM_INDEX/PYTHONPATH` +
+`exec python3 -m rescue_robot.main "$@"`），但它此前**只存在于 RDK 的 `~/rescue/` 下，
+从没进过仓库**，而 `docs/RUNBOOK.md:293` 与本文档 §4 都在教人执行 `./run.sh`。
+
+后果很直接：**任何人克隆仓库、照文档执行，第一步就 `No such file or directory`**；
+而 RDK 的 SD 卡一旦损坏或换卡，这个唯一入口就永久丢失 ——
+和 §3 固件那两个问题属于**同一类风险：关键资产只有一份、且在无版本控制的地方**。
+
+已用 `scp`（**不手抄**，避免中文注释被改坏）取回并 `md5sum` 双向比对一致：
+本地 `902870eea33ef4e596a29c7da5103d8c` == RDK 原件。
+
+### 部署方式确认
+
+RDK 上 **不是 git 仓库**（`~/rescue/` 无 `.git`），是**纯 rsync 部署**。
+即：**仓库是唯一事实来源**，RDK 只是运行副本。
+→ 每次改完必须：`commit` → `push` → `rsync` 到 RDK，**顺序不能反**，
+否则 RDK 上的临时改动会静默覆盖掉仓库内容（这次 `run.sh` 就差点是这种情况）。
+
+> 同步核查建议固化成习惯：**动完现场就在两侧各跑一次 md5 清单 diff**。
+> 这次正是"顺手全量比一下"才发现 `run.sh` 缺失的 ——
+> 它不在任何一份"已知问题清单"里，因为**没人想过要去数文件**。
