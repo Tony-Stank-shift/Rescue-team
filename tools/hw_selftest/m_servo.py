@@ -14,6 +14,13 @@ MAX_ANGLE = 70
 @register(MODULE, TITLE)
 def run(ctx):
     ev = []
+    # ⚠️ 2026-09-17 补：本模块会**真的驱动舵机**（抬起/下压/三个角度），
+    #    但原来**没有** `need_motion` 闸门 —— 于是"不加 --yes-motion"也会动夹爪。
+    #    实测事故：在 RDK 上直接跑 `hw_selftest`（无 --mock / 无 --yes-motion），
+    #    轮子因为其它模块有闸门而没动，**夹爪却动了**。已按同一安全约定补闸门。
+    gate = ctx.need_motion(MODULE)
+    if gate is not None:
+        return gate
     sc, err = ctx.require_cli(MODULE)
     if err is not None:
         return err

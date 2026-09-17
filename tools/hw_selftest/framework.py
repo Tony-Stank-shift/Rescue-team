@@ -229,9 +229,11 @@ class Ctx:
         if self.mock:
             return None                       # Mock 模式不需要真机
         if not self.yes_motion:
-            return skip(module, "该测试会驱动电机，需显式加 --yes-motion 才执行",
-                        ["安全约定：默认不动作"],
-                        "先架起轮子（离地空转）再加 --yes-motion 重跑")
+            return skip(module,
+                        "该测试会**驱动执行机构**（电机/舵机），需显式加 --yes-motion 才执行",
+                        ["安全约定：默认不动作，避免在场地/台架上突然动起来"],
+                        "先把轮子架起（离地空转）、并确认夹爪动作范围内无人，"
+                        "再加 --yes-motion 重跑")
         return None
 
 
