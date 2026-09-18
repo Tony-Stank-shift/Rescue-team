@@ -12,7 +12,7 @@ sleeve_lift.py —— 升降套取机构控制
 硬件抽象：
   AbstractSleeveLift  — 抽象基类
   MockSleeveLift      — 模拟套取机构（开发测试）
-  ServoSleeveLift     — SG90 舵机套取（0~70°，90mm 夹爪）
+  ServoSleeveLift     — SG90 舵机套取（0~85°，90mm 夹爪）
   SerialServoLift     — 串口舵机套取（经下位机 SERVO 命令控制）
 """
 
@@ -182,22 +182,22 @@ class ServoSleeveLift(AbstractSleeveLift):
     """
     SG90 舵机驱动的套取机构（从上往下套住目标）。
 
-    已确认参数（对齐下位机 servo.h：RAISED=70° / LOWERED=0°）：
+    已确认参数（对齐下位机 servo.h：RAISED=85° / LOWERED=0°）：
       - 舵机：SG90（PWM 控制）
-      - 行程：0°（下压/套住）⇄ 70°（抬起/释放）
+      - 行程：0°（下压/套住）⇄ 85°（抬起/释放）
       - 夹爪臂长：90mm
 
     状态映射：
-      - RAISED  = 70°（抬起/释放）
+      - RAISED  = 85°（抬起/释放）
       - LOWERED = 0°（下压套住）
       - HOLD    = 0°（套住目标运送中）
 
     ⚠️ PWM 输出到真实舵机由硬件层实现（pwm_pin 待定），当前记录角度。
     """
 
-    ANGLE_RAISED_DEG = 70.0   # 抬起/释放（对齐下位机 servo.h）
+    ANGLE_RAISED_DEG = 85.0   # 抬起/释放（对齐下位机 servo.h）
     ANGLE_LOWERED_DEG = 0.0   # 下压套住
-    MOVE_TIME_S = 0.4         # 0°↔70° 移动耗时
+    MOVE_TIME_S = 0.4         # 0°↔85° 移动耗时
 
     def __init__(self, pwm_pin: Optional[int] = None,
                  arm_length_mm: float = 90.0):
@@ -211,7 +211,7 @@ class ServoSleeveLift(AbstractSleeveLift):
             stroke_mm=arm_length_mm,
             timestamp=time.time(),
         )
-        logger.info(f"ServoSleeveLift(SG90) 初始化: 行程 0~70°, "
+        logger.info(f"ServoSleeveLift(SG90) 初始化: 行程 0~85°, "
                     f"夹爪 {arm_length_mm}mm, pwm_pin={pwm_pin}")
 
     @property
@@ -223,7 +223,7 @@ class ServoSleeveLift(AbstractSleeveLift):
         return self._angle_deg
 
     def lower(self, target_positions: Optional[dict] = None) -> bool:
-        """下压到 70° 套住目标。"""
+        """下压到 0° 套住目标。"""
         if target_positions is not None:
             self._target_positions = target_positions
 
@@ -289,14 +289,14 @@ class ServoSleeveLift(AbstractSleeveLift):
     # 放置（推入 + 上坡）——夹爪 V2：升降来源是三块**固定水平阶梯板**
     #   上板+中板 → 推橙色长方体(伤员) / 绿色正方体(普通物资)
     #   下板(最小)+中板 → 推黑色三棱锥(核心物资)
-    # 舵机行程保持 0°(套住) ⇄ 70°(释放)；本函数的"渐进"仅用于平滑卸力，
+    # 舵机行程为 0°(套住) ⇄ 85°(释放)；本函数的"渐进"仅用于平滑卸力，
     # 真正把目标推上紫边斜坡的是**底盘前进 + 固定阶梯**。
 
     RAMP_ANGLE_DEG = 34.0   # 斜坡角度（30 宽 / 20 高 ≈ 34°）
     RAMP_STEPS = 4          # 渐进上调步数
 
     def place_ramp(self) -> bool:
-        """放置：舵机从 0°(套住) 渐进抬起到 70°(释放)，配合底盘前进"推"入放置区。
+        """放置：舵机从 0°(套住) 渐进抬起到 85°(释放)，配合底盘前进"推"入放置区。
 
         夹爪 V2：推升由**三块固定阶梯板**完成，本函数只负责平滑释放。
         ⚠️ 精确角度序列 / 与底盘前进的协同需真机标定（SG90 定位，斜坡 34°）。
@@ -305,7 +305,7 @@ class ServoSleeveLift(AbstractSleeveLift):
         for step in range(self.RAMP_STEPS + 1):
             frac = step / self.RAMP_STEPS
             deg = self.ANGLE_LOWERED_DEG + \
-                frac * (self.ANGLE_RAISED_DEG - self.ANGLE_LOWERED_DEG)  # 0 → 70
+                frac * (self.ANGLE_RAISED_DEG - self.ANGLE_LOWERED_DEG)  # 0 → 85
             self.set_angle(deg)
             time.sleep(0.15)
         self._state.action = SleeveAction.RAISED
@@ -338,7 +338,7 @@ class SerialServoLift(AbstractSleeveLift):
 
     ── 夹爪 V2（2026-09-16 机构变更）──
     实物为 SolidWorks 装配体 ``装配体3 - 夹爪-2-2.STL``（2600 面实测）：
-      - 套取方式**不变**：自上而下套住目标；舵机行程**不变**（0° 套住 / 70° 释放，
+      - 套取方式**不变**：自上而下套住目标；舵机行程为 0° 套住 / 85° 释放，
         对齐下位机 ``servo.h``）。
       - 套取开口 **150mm(横向) × 100mm(前后)** —— 目标必须落在
         横向 ±75mm、前后 ±50mm 的矩形内才真套得住（见 ``config.Placement.SLEEVE_OPENING_MM``）。
@@ -447,16 +447,16 @@ class SerialServoLift(AbstractSleeveLift):
     # 放置（推入 + 上坡）——夹爪 V2：升降来源是三块**固定水平阶梯板**
     #   上板+中板 → 推橙色长方体(伤员) / 绿色正方体(普通物资)
     #   下板(最小)+中板 → 推黑色三棱锥(核心物资)
-    # 舵机行程保持 0°(套住) ⇄ 70°(释放)；本函数的"渐进"仅用于平滑卸力，
+    # 舵机行程为 0°(套住) ⇄ 85°(释放)；本函数的"渐进"仅用于平滑卸力，
     # 真正把目标推上紫边斜坡的是**底盘前进 + 固定阶梯**。
 
     ANGLE_LOWERED_DEG = 0.0     # 下压套住（对齐下位机 servo.h）
-    ANGLE_RAISED_DEG = 70.0     # 抬起/释放
+    ANGLE_RAISED_DEG = 85.0     # 抬起/释放
     RAMP_ANGLE_DEG = 34.0
     RAMP_STEPS = 4
 
     def place_ramp(self) -> bool:
-        """放置：发 SERVO,ANGLE 渐进抬起（0→70），配合底盘前进"推"入放置区。
+        """放置：发 SERVO,ANGLE 渐进抬起（0→85），配合底盘前进"推"入放置区。
 
         夹爪 V2：推升由**三块固定阶梯板**完成，本函数只负责平滑释放。
         ⚠️ 精确角度序列 / 与底盘前进协同需真机标定（斜坡 34°，SG90 定位）；
@@ -467,7 +467,7 @@ class SerialServoLift(AbstractSleeveLift):
         for step in range(self.RAMP_STEPS + 1):
             frac = step / self.RAMP_STEPS
             deg = int(round(self.ANGLE_LOWERED_DEG +
-                            frac * (self.ANGLE_RAISED_DEG - self.ANGLE_LOWERED_DEG)))  # 0 → 70
+                            frac * (self.ANGLE_RAISED_DEG - self.ANGLE_LOWERED_DEG)))  # 0 → 85
             self._chassis.send_servo_angle(deg)
             time.sleep(self._move_time_s / self.RAMP_STEPS)
         self._state.action = SleeveAction.RAISED

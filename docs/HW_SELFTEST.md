@@ -51,11 +51,11 @@ PYTHONPATH=src python3 tools/hw_selftest.py --list
 每个模块输出一行结论 + 若干证据行 + 一条处置建议：
 
 ```
-▶ servo — 夹爪舵机（RAISE/LOWER/HOLD/ANGLE 0~70 + 越界保护）
-   ✅ [PASS] 夹爪舵机正常（动作命令、0~70° 全行程、越界保护均正确）
+▶ servo — 夹爪舵机（RAISE/LOWER/HOLD/ANGLE 0~85 + 越界保护）
+   ✅ [PASS] 夹爪舵机正常（动作命令、0~85° 标定范围、越界保护均正确）
         · SERVO,RAISE → ACK,SERVO,RAISE
-        · SERVO,ANGLE,70 → ACK,SERVO,ANGLE,70
-        · SERVO,ANGLE,71 → ERR,SERVO_ANGLE
+        · SERVO,ANGLE,85 → ACK,SERVO,ANGLE,85
+        · SERVO,ANGLE,86 → ERR,SERVO_ANGLE
         ↳ 处置：...
 ```
 
@@ -95,7 +95,7 @@ start_button → servo → odometry → motors → velocity → camera → visio
 | `serial` | 串口能否打开 + `PING→PONG` + `START→ACK,START` | 两者都收到 | 见 §4 串口四分类；能开但无 PONG → 下位机没跑/只接单向/未共地 |
 | `telemetry` | ODOM **8** 字段@20Hz、IMU **10** 字段@50Hz、TEL **8** 字段、数值合理性（az≈1000mg）、解析器一致性 | 帧前缀/字段数/频率/数值都对 | 见 §4；0 行：下位机没发数据或波特率不符 |
 | `start_button` | 一键启动：软件层 `read_button` 是否认得 `EVENT,START_BUTTON`；硬件层需 `HW_SELFTEST_INTERACTIVE=1` 人工按键 | 软件层识别成功 | 识别不了 → 现场按按钮不会进 AUTONOMOUS（查 `SerialChassis.read_button` 匹配前缀） |
-| `servo` | RAISE/LOWER/HOLD 各自 ACK；ANGLE 0/35/70 全部接受；71/180/-1 必须回 `ERR,SERVO_ANGLE` | 动作 ACK 正确 + 越界被拒 | 无 ACK：固件未实现或未 `START`；越界没被拒 → 有把舵机顶到限位的风险。角度语义：**0°=下压套住、70°=抬起释放** |
+| `servo` | RAISE/LOWER/HOLD 各自 ACK；ANGLE 0/45/85 全部接受；86/180/-1 必须回 `ERR,SERVO_ANGLE` | 动作 ACK 正确 + 越界被拒 | 无 ACK：固件未实现或未 `START`；越界没被拒 → 有把舵机顶到限位的风险。动作角度语义：**0°=下压套住、85°=抬起释放** |
 | `odometry` | 坐标换算（前进 +Y / 左移 −X / theta 累加）+ 实际运动符号 | 换算正确；`--yes-motion` 时前进 Δx>0、左转 Δθ>0、右转 Δθ<0 | 符号反 → 左右编码器 A/B 相接反或左右轮定义互换 |
 | `motors` | `TESTPWM` 正反转（PWM=30，2s）+ `STOP` 后残余轮速 | 正转两轮 Δenc/轮速为正、反转全为负、STOP 后 <0.05m/s | 某方向不动：电机极性/TB6612 接线/左右轮接反；STOP 停不住：停车链路或速度环 |
 | `velocity` | **50Hz 持续**下发 `VEL,200,0` 3s，实测位移速度 vs 目标 | 偏差 ≤±25% 且期间无 `EVENT,WATCHDOG*` | ⚠️ 下位机看门狗 300ms 保持/800ms 停：**单发 VEL 必被停**。出现 WATCHDOG → 主循环有阻塞（视觉/串口读等待）导致断流 |
@@ -401,4 +401,3 @@ _run_once = lambda self, dt: None
                            →  decision:   [FAIL] 终场不停车：决策引擎已 DONE 但导航目标没清
 ```
 每条 FAIL 都带「↳ 处置」，直接告诉现场下一步查哪个文件/哪个常量。
-

@@ -449,7 +449,7 @@ match:
 | **F8** | 能收数据、能发 VEL，但**车不动** | `sudo cat /dev/ttyS1` 看不到 `VEL,...`；或下位机没响应 | ① 确认 `RUN_MODE=real`（F4）；② 确认到了 AUTONOMOUS（只有主循环发 VEL）；③ 看是否卡在 `STOP`/`ESTOP` 状态（急停锁定需重启）；④ 用 `tools/hw_selftest.py --only velocity` 直接测闭环；⑤ **速度符号存疑**：上层 `VelocityCommand.linear` 是 mm/s，`velocity_to_command()` 取整下发（`chassis_interface.py:95-104`）。若发现"发正速度车后退"→ 符号约定与下位机不一致，**【待确认】**（见 §4 R6） |
 | **F9** | **速度明显不对**（太快/太慢/单位像差了 1000 倍） | 实测 vs `VEL` 值 | ① 单位链：上层 mm/s → `VEL,v_mm_s`（mm/s）→ 下位机自行换算轮速（`HARDWARE_DEPENDENCIES.md:148`）。若差了 1000 倍，就是 mm/m 混用；② 上限 850mm/s（`config/robot.default.yaml:39`）；③ 调 `robot.motors.max_speed_mm_s` 或 PID（`yaml:31-38`）后**重启**（YAML 只在启动时读，`main.py:105`，**没有热加载**——虽然 YAML 注释写了"热加载生效"，实际未接，见 §4 R9） |
 | **F10** | **舵机不动** | 日志无 `SERVO` 相关行 | ① 确认 `chassis` 非空（真机模式下会自动注入 `SerialServoLift`，`main.py:183-188`）；② 手工发一条：`tools/hw_selftest.py --only servo`；③ 确认舵机信号线在 STM32 **PB6**（`config.py:21`）；④ 下位机固件是否支持 `SERVO,RAISE/LOWER/HOLD`（协议 v1.1，`serial_chassis.py:13`） |
-| **F11** | 舵机**方向反** | 下压变成抬起 | 角度语义：**0° = 下压套住，70° = 抬起释放**（`sleeve_lift.py:185-199`，对齐下位机 `servo.h`）。若实测相反 → 下位机角度映射反了，**改下位机**（上位机侧改会破坏 `place_ramp()` 的 0→70 递增序列，`sleeve_lift.py:423-440`） |
+| **F11** | 舵机**方向反** | 下压变成抬起 | 角度语义：**0° = 下压套住，85° = 抬起释放**（`sleeve_lift.py` 对齐下位机 `servo.h`）。若实测相反 → 下位机角度映射反了，**改下位机**（上位机侧改会破坏 `place_ramp()` 的 0→85 递增序列） |
 | **F12** | **套取总是失败**（反复抬爪后退重试） | 日志 `视觉确认：套取框内未见目标 → 判为套取失败，将抬爪后退重试`（`transport_pipeline.py` 搜 `套取框内未见`） | ⚠️ **夹爪 V2 换了机构（150×100 方形框），`SLEEVE_ROI` 的旧值大概率已失效 → 这一项升级为本轮最高优先级**。① **首选处置：关掉视觉确认**——`config.Camera.SLEEVE_CONFIRM = False`（YAML `perception.camera.sleeve_confirm`）；② 或按 `docs/GRIPPER_V2_GEOMETRY.md` §5-① 重新标定 `Camera.SLEEVE_ROI`（归一化 x1,y1,x2,y2）——把目标真的放进**新套取框**里再看检测框中心落在哪；③ 有**自动失效保护**：连续 5 次确认失败会自动关闭确认（`MAX_CONFIRM_FAILS`），所以最多白试 5 次；④ 连续 3 次套取失败会放弃本趟 |
 
 ### 2.3 视觉类
@@ -632,7 +632,7 @@ from rescue_robot.main import main; main()
 | `odometry` | 里程计（坐标换算 + 前进/左转符号） |
 | `velocity` | 速度闭环（50Hz 持续 VEL → 实测 vs 目标） |
 | `motors` | 电机与底盘（正反转 / STOP 立即停） |
-| `servo` | 夹爪舵机（RAISE/LOWER/HOLD/ANGLE 0~70 + 越界保护） |
+| `servo` | 夹爪舵机（RAISE/LOWER/HOLD；ANGLE 0~85 标定范围 + 越界保护，RAISE 默认 85°） |
 | `start_button` | 一键启动链路（EVENT,START_BUTTON → AUTONOMOUS） |
 | `camera` | 摄像头（打开 / 分辨率 / 帧率） |
 | `ranging` | 视觉测距（底边+倾角地平面法） |
@@ -689,7 +689,7 @@ PYTHONPATH=src python3 tools/hw_selftest.py --duration 5       # 遥测/速度�
 | 7 | **电池低压阈值** | `config.py:60`（11.0V） | 电池类型未最终确认（12V/2500mAh，`HARDWARE_DEPENDENCIES.md:128-134`） | 量一次低电量实压 |
 | 8 | **`VEL` 的 w 符号 / 直行方向** | — | 未实测 | §4 R6 |
 | 9 | **推进距离 `PUSH_DIST_MM`** | YAML `placement.push_dist_mm`（当前 100mm） | 注释标明"真机标定" | 实测推入斜坡所需距离（V2 靠三块固定阶梯板推升） |
-| 10 | **投放分步上调次数** ⚠️**V2 新增** | YAML `placement.progressive_raise_steps`（当前 4） | 旧行为=推入中舵机 0°→70° 分 4 步渐进抬；**V2 推升来源已改为三块固定阶梯板**，该动作的原有升力作用消失 | 分别试 `4` 与 `0`（0=保持套住到到位后一次性释放），看哪种能让目标稳定爬上紫边斜坡不中途掉落。分步录视频 |
+| 10 | **投放分步上调次数** ⚠️**V2 新增** | YAML `placement.progressive_raise_steps`（当前 4） | 当前行为=推入中舵机 0°→85° 分 4 步渐进抬；**V2 推升来源已改为三块固定阶梯板**，该动作主要用于平滑释放 | 分别试 `4` 与 `0`（0=保持套住到到位后一次性释放），看哪种能让目标稳定爬上紫边斜坡不中途掉落。分步录视频 |
 | 10b | **套取接近闸门 `CAPTURE_RADIUS_MM`** ⚠️**V2 新增·高危** | YAML `placement.capture_radius_mm`（当前 100） | **旧值 150 对 V2 的 150×100 开口必然套空**（目标须落在车心前方 20~120mm 才在框正下方；150 在区间外）→ 软件记账成功、实车套空（幽灵捕获，同 S-40 家族） | 把目标放好、手动把车开到目标正下方，量车心到目标的前后距离 → 该值取它；**绝不可 > 120**。推导见 `docs/GRIPPER_V2_GEOMETRY.md` §4.1 |
 | 10c | **套取开口 `SLEEVE_OPENING_MM`** | YAML `placement.sleeve_opening_mm`（当前 `[150,100]`） | ✅ 已按 STL 实测填入（`tools/stl_gripper_probe.py`） | 机构再改时重跑探测脚本；它决定 10b 的上限 |
 | 11 | **50Hz 帧预算** | 本文 §3.2 | **全部为静态估算，未实测** | §3.4 的三个数 |
@@ -798,7 +798,7 @@ PYTHONPATH=src python3 tools/hw_selftest.py --only serial
 | `navigation/motion_control.py` | `track_path()` / `compute_velocity()`、到位容差 |
 | `navigation/forbidden_zones.py` | 外扩常量（对方安全区 50mm / 场边 100mm）、`write_to_cost_map()`、`clamp_to_safe()` |
 | `transport/transport_pipeline.py` | `_halt_for_capture()`、套取/投放触发距离、视觉确认与自动关闭（连续 5 次）、`_push_dist_mm`、趟次日志 |
-| `transport/sleeve_lift.py` | `RAISE/LOWER/HOLD` 抽象、角度语义（0°=下压 / 70°=抬起）、`lower_with_retry`、`place_ramp` |
+| `transport/sleeve_lift.py` | `RAISE/LOWER/HOLD` 抽象、角度语义（0°=下压 / 85°=抬起）、`lower_with_retry`、`place_ramp` |
 | `transport/load_manager.py` | `MAX_LOAD`、`can_load()` / `can_load_batch()`（危险目标拒绝、伤员独占） |
 | `innovation/config_loader.py` | `ConfigLoader.load_yaml()`、`os.getcwd()` 相对路径解析、YAML 缺失降级 JSON |
 | `tools/hw_selftest.py` | `--only/--mock/--yes-motion/--port/--duration/--image/--list`、`--port` 默认 `CHASSIS_PORT` 否则 `/dev/ttyS1` |

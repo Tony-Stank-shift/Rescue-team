@@ -148,9 +148,9 @@ right_rpm = right_mm_s / 3.403392
 套取机构使用普通 180°位置舵机，由 STM32 的 `PB6/TIM4_CH1` 输出
 50 Hz PWM。比赛流程使用动作命令，具体机械端点脉宽由 STM32 保存：
 
-> 套取机构（SG90）**实际行程 0°~70°**（对齐下位机 `servo.h`）：
-> **0° = 下压套住（LOWERED，1000us）**、**70° = 抬起释放（RAISED，1778us）**；
-> 舵机物理范围仍是 0~180°，上层只使用 0~70° 这一段。
+> 套取机构（SG90）实机标定后的**安全行程为 0°~85°**（对齐下位机 `servo.h`）：
+> **0° = 下压套住（LOWERED，1000us）**、**85° = 抬起释放（RAISED，1944us）**；
+> 上电初始化和 `SERVO,RAISE` 均使用 85°，不允许命令越过该标定上限。
 
 ```text
 SERVO,RAISE
@@ -178,7 +178,7 @@ ACK,SERVO,HOLD
 SERVO,ANGLE,deg
 ```
 
-`deg` 必须是 `0～180` 的整数；成功回复
+`deg` 必须是 `0～85` 的整数；成功回复
 `ACK,SERVO,ANGLE,deg`，越界回复 `ERR,SERVO_ANGLE`。所有舵机命令必须在
 `START` 后执行；`ESTOP` 锁定后拒绝舵机动作。
 
@@ -403,7 +403,7 @@ ERR,IMU_NOT_READY
 | `NOT_STARTED` | 尚未执行 `START` 就发送运动命令 |
 | `LOCKED` | 已进入紧急停车锁定状态 |
 | `DURATION` | 测试时间无效或超过上限 |
-| `SERVO_ANGLE` | 舵机调试角度超出 0～180°，或角度字段不是整数 |
+| `SERVO_ANGLE` | 舵机调试角度超出 0～85°，或角度字段不是整数 |
 | `IMU_NOT_READY` | IMU 尚未完成初始化或尚无有效样本 |
 
 ## 6. 通信异常与自动恢复

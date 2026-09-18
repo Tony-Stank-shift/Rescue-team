@@ -11,7 +11,7 @@ serial_chassis.py —— 上位机 ↔ 下位机(STM32) 串口底盘驱动
       · START                     → 启动，下位机清零局部里程计，回复 ACK,START
       · VEL,v_mm_s,w_mrad_s       → 速度指令（v 整数 mm/s，w 整数 mrad/s）
       · SERVO,RAISE/LOWER/HOLD    → 套取机构舵机动作命令，回复 ACK,SERVO,xxx
-      · SERVO,ANGLE,deg           → 调试舵机角度（0~180），回复 ACK,SERVO,ANGLE,deg
+      · SERVO,ANGLE,deg           → 调试舵机角度（0~85），回复 ACK,SERVO,ANGLE,deg
       · STOP                      → 普通停车（清 PI 积分，不清里程计），回复 ACK,STOP
       · ESTOP                     → 紧急停车锁定，回复 ACK,ESTOP
   - 下行（下位机 → 上位机）：
@@ -166,7 +166,7 @@ class SerialChassis:
         return self._send(f"SERVO,{action.upper()}")
 
     def send_servo_angle(self, deg: float) -> bool:
-        """发送调试舵机角度 SERVO,ANGLE,deg（0~180 整数）。"""
+        """发送调试舵机角度 SERVO,ANGLE,deg（0~85 整数）。"""
         return self._send(f"SERVO,ANGLE,{int(deg)}")
 
     def send_stop(self) -> bool:

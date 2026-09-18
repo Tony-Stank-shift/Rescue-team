@@ -1,14 +1,14 @@
-"""m_servo —— 夹爪舵机：RAISE/LOWER/HOLD/ANGLE(0~70) + 越界保护"""
+"""m_servo —— 夹爪舵机：RAISE/LOWER/HOLD/ANGLE(0~85) + 越界保护"""
 
 import time
 
 from .framework import register, ok, bad, skip
 
 MODULE = "servo"
-TITLE = "夹爪舵机（RAISE/LOWER/HOLD/ANGLE 0~70 + 越界保护）"
+TITLE = "夹爪舵机（RAISE/LOWER/HOLD/ANGLE 0~85 + 越界保护）"
 
-#: 下位机 servo.h：0°=下压套住、70°=抬起释放（物理范围 0~180，上层只用 0~70）
-MAX_ANGLE = 70
+#: 实机标定端点：0°=下压、85°=抬起；ANGLE 命令最大允许 85°。
+MAX_ANGLE = 85
 
 
 @register(MODULE, TITLE)
@@ -33,11 +33,11 @@ def run(ctx):
         而 `wait_for` 是**边读边丢弃**不匹配的行（见 `SerialChassis.wait_for`）。
         于是当固件**正确**回了 `ERR,SERVO_ANGLE` 时，第一个 wait_for 会把这个 ERR 行
         读掉并丢进垃圾桶，第二个 wait_for 在缓冲里再也找不到它 → 返回 None
-        → 自检误报"越界角度 71 未被拒绝（实际 None）"。
+        → 自检误报"越界角度 86 未被拒绝（实际 None）"。
 
         实测就是这么误报的：报的是"实际 **None**"（什么都没收到），而不是
         "收到了错误的 ACK" —— 这两个含义完全不同，前者一眼就该怀疑读取逻辑。
-        固件侧其实是对的（`command.c` 里 71 > `SERVO_MAX_ANGLE_DEG=70` → 回 ERR）。
+        固件侧其实是对的（`command.c` 里 86 > `SERVO_MAX_ANGLE_DEG=85` → 回 ERR）。
 
         现在改成**一次遍历、ACK 与 ERR 都认**，不再有"读掉再找"的窗口。
         """
@@ -63,8 +63,8 @@ def run(ctx):
             return bad(MODULE, f"{cmd} 未按预期应答（应为 {want}，实际 {got}）",
                        ev, "确认下位机固件已实现 SERVO 动作命令；若回 ERR，检查是否已 START")
 
-    # 角度命令：边界 0 / 中间 35 / 最大 70
-    for deg in (0, 35, MAX_ANGLE):
+    # 标定角度命令：边界 0 / 中间 45 / 最大 85；默认 RAISE 也是 85°。
+    for deg in (0, 45, MAX_ANGLE):
         got = send(f"SERVO,ANGLE,{deg}")
         ev.append(f"SERVO,ANGLE,{deg} → {got}")
         if got != f"ACK,SERVO,ANGLE,{deg}":
@@ -81,4 +81,4 @@ def run(ctx):
 
     # 收尾：抬起，避免夹爪停在压住地面的位置
     send("SERVO,RAISE")
-    return ok(MODULE, "夹爪舵机正常（动作命令、0~70° 全行程、越界保护均正确）", ev)
+    return ok(MODULE, "夹爪舵机正常（动作命令、0~85° 标定范围、越界保护均正确）", ev)

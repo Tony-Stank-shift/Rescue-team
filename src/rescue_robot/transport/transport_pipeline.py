@@ -102,7 +102,7 @@ class TransportPipeline:
         self._total_score = 0
 
         # 放置（推入 + 上坡）框架参数 —— ⚠️ 真机需标定（夹爪 V2，见 config.Placement）
-        # 分步上调次数来自 YAML：4=旧行为（推入中 0°→70° 分 4 步渐进抬），
+        # 分步上调次数来自 YAML：4=推入中 0°→85° 分 4 步渐进抬，
         # 0=推入全程保持 0°套住、到位后一次性释放。V2 的推升来源是三块固定阶梯板。
         try:
             self._place_steps = max(0, int(getattr(
@@ -600,7 +600,7 @@ class TransportPipeline:
                     and self._place_step < self._place_steps:
                 self._place_step += 1
                 frac = self._place_step / self._place_steps
-                deg = frac * 70.0   # 0 → 70（套住→释放，对齐下位机 servo.h）
+                deg = frac * 85.0   # 0 → 85（套住→释放，对齐下位机 servo.h）
                 if hasattr(self._sleeve, 'set_angle'):
                     self._sleeve.set_angle(deg)
                 else:

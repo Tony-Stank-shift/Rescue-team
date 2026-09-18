@@ -5,7 +5,7 @@ verify_selftest_truthfulness.py —— 自检脚本自身不得说谎（2026-09-
 
   ① `TEL 字段数 8（期望 10）` —— `EXPECT_FIELDS["TEL"]` 是从 `IMU` 抄错的 10。
      协议与固件都是 **8 段**（`TEL` + 7 个值）。
-  ② `越界角度 71 未被拒绝（实际 None）` —— 固件**正确**回了 `ERR,SERVO_ANGLE`，
+  ② `越界角度 86 未被拒绝（实际 None）` —— 固件**正确**回了 `ERR,SERVO_ANGLE`，
      但自检助手写的是 `wait_for("ACK,SERVO",1.0) or wait_for("ERR,",0.3)`，
      而 `wait_for` **边读边丢弃**不匹配的行 → 第一个 wait_for 把 ERR 行读掉丢了，
      第二个再也找不到 → None。报出来像"固件没校验"，实际是读取逻辑吃掉了应答。
@@ -159,17 +159,17 @@ class _FakeSC:
 _ns = {"time": _time, "sc": _FakeSC()}
 exec("def send(cmd, wait=0.5):\n" + "\n".join(
     "    " + ln for ln in _code.splitlines()), _ns)          # noqa: S102
-_got = _ns["send"]("SERVO,ANGLE,71")
+_got = _ns["send"]("SERVO,ANGLE,86")
 chk("行为验证：固件回 ERR,SERVO_ANGLE 时助手能读到它（旧写法会得到 None）",
     _got == "ERR,SERVO_ANGLE", f"得到 {_got!r}")
 
 # 正常路径也必须仍能读到 ACK
-_ns2 = {"time": _time, "sc": _FakeSC("ACK,SERVO,ANGLE,35")}
+_ns2 = {"time": _time, "sc": _FakeSC("ACK,SERVO,ANGLE,45")}
 exec("def send(cmd, wait=0.5):\n" + "\n".join(
     "    " + ln for ln in _code.splitlines()), _ns2)         # noqa: S102
-_got2 = _ns2["send"]("SERVO,ANGLE,35")
-chk("行为验证：正常路径仍能读到 ACK,SERVO,ANGLE,35",
-    _got2 == "ACK,SERVO,ANGLE,35", f"得到 {_got2!r}")
+_got2 = _ns2["send"]("SERVO,ANGLE,45")
+chk("行为验证：正常路径仍能读到 ACK,SERVO,ANGLE,45",
+    _got2 == "ACK,SERVO,ANGLE,45", f"得到 {_got2!r}")
 
 # 反向对照：用旧的"两段式"写法喂同一流，必然得到 None —— 证明这条断言有意义
 _f2 = _FakeSC()

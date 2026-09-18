@@ -23,7 +23,7 @@ static uint16_t angle_to_pulse_us(uint16_t angle_deg)
         angle_deg = SERVO_MAX_ANGLE_DEG;
     }
 
-    /* 0° = 1000us,70° = 1778us。 */
+    /* 实机标定后的安全映射：0° = 1000us，85° = 1944us。 */
     return (uint16_t)(
         SERVO_MIN_PULSE_US +
         ((((uint32_t)angle_deg *

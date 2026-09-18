@@ -51,7 +51,7 @@ firmware/
 | I2C2 | PB10=SCL, PB11=SDA | MPU6050（`WHO_AM_I` 必须 `0x68`） |
 | TIM1 CH1/CH4 | PA8=LPWM, PA11=RPWM | 左右电机 PWM |
 | TIM2 / TIM3 | — | 左右编码器 |
-| TIM4 CH1 | PB6 | 舵机 PWM（0°=1000µs 套住 / 70°=1778µs 释放） |
+| TIM4 CH1 | PB6 | 舵机 PWM（实机标定安全端点：0°=1000µs 套住 / 85°=1944µs 释放；上电默认 85°） |
 | **START_BTN** | **PB9**（上拉，拨到 ON 拉低） | 一键启动**自锁开关** |
 | STATUS_LED | PC13 | 状态灯（**高电平点亮**，注意不是常见的低电平） |
 
