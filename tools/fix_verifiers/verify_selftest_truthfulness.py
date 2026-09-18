@@ -197,5 +197,42 @@ _seg = _seg[:_seg.index("Servo_SetAngleDeg")]
 chk("越界时**先 return、不驱动舵机**（所以测越界这一项本身不会动机构）",
     "return;" in _seg and "ERR,SERVO_ANGLE" in _seg)
 
+print("\nD) 舵机行程端点：上位机 / 固件 / 协议文档 三处必须一致")
+# 为什么必须交叉校验：舵机行程是**两边各写一份**的常量。单边改了另一边没跟上，
+# 后果是"软件以为抬到释放位、实际只抬到一半" → 目标放不掉 / 机构顶死。
+# 2026-09-18 现场就把抬起位由 70° 标定成了 85°（脉宽 1778→1944us），
+# 涉及 servo.h / sleeve_lift.py / chassis_serial_protocol.md 三处。
+def _fw_define(name: str):
+    m = re.search(rf"#define\s+{name}\s+(\d+)U?", _servo_h)
+    return int(m.group(1)) if m else None
+
+
+_fw_raised = _fw_define("SERVO_RAISED_ANGLE_DEG")
+_fw_lowered = _fw_define("SERVO_LOWERED_ANGLE_DEG")
+_fw_max2 = _fw_define("SERVO_MAX_ANGLE_DEG")
+chk(f"固件 servo.h 有 RAISED/LOWERED 端点定义"
+    f"（RAISED={_fw_raised} / LOWERED={_fw_lowered} / MAX={_fw_max2}）",
+    None not in (_fw_raised, _fw_lowered, _fw_max2))
+
+_sl_src = (_ROOT / "src" / "rescue_robot" / "transport" / "sleeve_lift.py").read_text(
+    encoding="utf-8", errors="replace")
+_py_raised = [int(x) for x in re.findall(r"ANGLE_RAISED_DEG\s*=\s*(\d+)", _sl_src)]
+_py_lowered = [int(x) for x in re.findall(r"ANGLE_LOWERED_DEG\s*=\s*(\d+)", _sl_src)]
+chk(f"上位机 sleeve_lift.py 的抬起角 {sorted(set(_py_raised))} == 固件 "
+    f"{_fw_raised}（{len(_py_raised)} 处定义都要对）",
+    bool(_py_raised) and all(v == _fw_raised for v in _py_raised))
+chk(f"上位机 sleeve_lift.py 的下压角 {sorted(set(_py_lowered))} == 固件 {_fw_lowered}",
+    bool(_py_lowered) and all(v == _fw_lowered for v in _py_lowered))
+chk("抬起角不超过固件允许的上限（否则会被固件钳位、放不掉目标）",
+    _fw_raised <= _fw_max2)
+
+# 协议文档是现场交接时唯一会读的东西，写错会让人按 90° 去调（机构顶死）
+_proto = (_ROOT / "chassis_serial_protocol.md").read_text(
+    encoding="utf-8", errors="replace")
+chk(f"协议文档写的行程上界与固件一致（应出现 0°~{_fw_raised}°）",
+    f"0°~{_fw_raised}°" in _proto)
+chk("协议文档里不再残留旧的 70° 行程描述",
+    "0°~70°" not in _proto)
+
 print(f"\n自检真实性验证结果: {sum(ok)}/{len(ok)} 通过")
 assert all(ok), "自检真实性验证未全部通过"
