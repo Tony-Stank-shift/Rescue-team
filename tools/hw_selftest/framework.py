@@ -94,6 +94,7 @@ ORDER = [
     "velocity",     # 速度环（要动）
     "camera",       # 摄像头
     "vision",       # 视觉识别
+    "pickplace",    # 端到端：识别绿色 → 抓住 → 放进红色安全区（要动）
 ]
 
 

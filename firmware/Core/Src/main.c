@@ -175,6 +175,14 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     Command_Update();
+
+    /* IMU 未就绪时周期性重试初始化。
+       启动时那次 MPU6050_Init 已改为非致命（不会 Error_Handler 死循环），
+       但若就此不重试，开机瞬间没应答就会**整场没有 IMU 帧**
+       （2026-09-17 实测：串口只剩 ODOM/TEL，上位机自检报 IMU 失败）。
+       本调用失败时每 1s 重试一次，成功后自动转为正常，开销可忽略。 */
+    MPU6050_TaskRetryInit(&hi2c2);
+
     (void)MPU6050_Update();
 
     if (Encoder_Update())

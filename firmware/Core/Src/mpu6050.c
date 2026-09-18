@@ -118,6 +118,41 @@ HAL_StatusTypeDef MPU6050_Init(I2C_HandleTypeDef *i2c)
     return HAL_OK;
 }
 
+/*
+ * IMU 未就绪时的周期性重试（2026-09-17 现场新增）。
+ *
+ * 为什么需要：
+ *   启动时 MPU6050_Init() 只调用一次。为了让"IMU 故障不拖垮整机"，
+ *   那处的失败已被改为**非致命**（不再 Error_Handler 死循环）——
+ *   但副作用是**失败后永不重试**：只要开机瞬间 IMU 没应答
+ *   （上电时序没赶上 / I2C 瞬时故障 / 模块接触不良），整场就再也不会
+ *   产生 IMU 帧。实测：串口只剩 ODOM/TEL、IMU 行数为 0，
+ *   上位机自检报 IMU 失败并拒绝启动。
+ *
+ * 做法：主循环里按 MPU6050_RETRY_PERIOD_MS 的节奏重试初始化。
+ *   成功即转为 initialized=true，之后本函数直接返回，开销可忽略。
+ *   这样"上电时序""瞬时故障""接触不良后恢复"三类情况都能自愈。
+ */
+#define MPU6050_RETRY_PERIOD_MS 1000U
+
+void MPU6050_TaskRetryInit(I2C_HandleTypeDef *i2c)
+{
+    static uint32_t last_try_ms;
+    uint32_t now;
+
+    if (initialized || (i2c == NULL))
+    {
+        return;
+    }
+    now = HAL_GetTick();
+    if ((now - last_try_ms) < MPU6050_RETRY_PERIOD_MS)
+    {
+        return;
+    }
+    last_try_ms = now;
+    (void)MPU6050_Init(i2c);
+}
+
 HAL_StatusTypeDef MPU6050_Update(void)
 {
     uint8_t raw[14];

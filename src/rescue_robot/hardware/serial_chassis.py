@@ -196,6 +196,12 @@ class SerialChassis:
     ACK_TIMEOUT_S: float = 1.5
     ACK_GAP_S: float = 0.25
 
+    #: 单次 ``_read_line()`` 等一整行的最长时间（秒）。取值等于串口 timeout，
+    #: 保持与旧 ``readline()`` 路径相同的阻塞语义。
+    READ_WAIT_S: float = 0.02
+    #: 等待新字节时的轮询间隔（秒）。仅在没有数据时 sleep，避免忙等烧 CPU。
+    READ_POLL_S: float = 0.001
+
     def send_command_await(self, command: str, expect_prefix: str,
                            *, timeout: Optional[float] = None) -> Optional[str]:
         """发一条命令并等待指定前缀的应答，**带重试**；返回命中的应答行，全败返回 None。
@@ -300,23 +306,57 @@ class SerialChassis:
             dropped += 1
         return dropped
 
-    def _read_line(self) -> Optional[str]:
-        """读一行原始文本（strip）；无数据/未打开返回 None。"""
+    def _read_line(self, timeout: Optional[float] = None) -> Optional[str]:
+        """读一行原始文本（strip）；无数据/未打开返回 None。
+
+        ⚠️⚠️ T0-6 补丁：本函数**只能从共享接收缓冲 `_rx_buf` 取整行**，
+        绝不能退回 `self._ser.readline()`。
+
+        为什么（这条是 2026-09-17 现场实测出来的，属于 T0-6 自己的半成品）：
+
+        `_pump_rx()` 会把内核缓冲里**当前所有**字节搬进 `_rx_buf`，它完全可能在
+        某一行传到一半时被执行（例如 `PONG\\r\\n` 只到了 `PO`）。此时
+        `_pop_line_buffered()` 找不到 `\\n` 而返回 None，旧实现就转去
+        `self._ser.readline()` —— 而那是**同一个字节流**，它会把刚到的 `NG\\r\\n`
+        单独取走。后果有两个，都是致命的：
+
+        1) 该行被从中间劈成 `PO` + `NG`，`wait_for("PONG")` 永远匹配不上 →
+           `start_match()` 握手失败 → 整场比赛被拒
+           （现场表现就是"PING 收不到 PONG"，只能靠 4 次重发蒙过去）。
+        2) 残留的半行（`PO`）留在 `_rx_buf` 里，和下一行的字节粘成一条垃圾行
+           （实测残留样本：`b'ODOM,0.139961,-0TEL,666965,0,0.0IMU,666982,...'`）。
+
+        实测（2026-09-17，RDK `/dev/ttyS1` @115200，25 s）：
+            `_read_line()` 一共返回 1979 行，其中**非合法前缀的碎片 482 行 = 24.4%**；
+            完整 ODOM 帧 20 Hz → 13.9 Hz（-30%），TEL 8.5 Hz → 1.1 Hz（-87%）；
+            裸 pyserial 用单一读路径时 PING→PONG 40/40 成功、p50 时延 10.6 ms，
+            换成 `send_command_await` 就变成 7% 需要重发。
+        结论：劈行是**上位机自己造出来的**，与下位机无关（下位机全程 0 个 `ERR` 行）。
+
+        正确做法：缓冲里没有整行时，**继续往同一个缓冲追加**新字节再找整行。
+        阻塞时长与旧 `readline()` 一致（`READ_WAIT_S` == 串口 timeout）。
+        """
         if not self.is_open:
             return None
-        # 先看共享缓冲有没有整行（T0-6：缓冲由所有读取接口共用，避免互相"偷吃"数据）
         buffered = self._pop_line_buffered()
         if buffered is not None:
             return buffered
-        try:
-            line = self._ser.readline()
-        except Exception as e:
-            logger.warning(f"串口读取异常: {e}")
-            return None
-        if not line:
-            return None
-        text = line.decode('ascii', errors='ignore').strip()
-        return text if text else None
+        deadline = time.time() + (self.READ_WAIT_S if timeout is None else timeout)
+        while time.time() < deadline:
+            try:
+                waiting = int(getattr(self._ser, "in_waiting", 0) or 0)
+                if waiting > 0:
+                    self._rx_buf += self._ser.read(waiting)
+            except Exception as e:
+                logger.warning(f"串口读取异常: {e}")
+                return None
+            if waiting:
+                line = self._pop_line_buffered()
+                if line is not None:
+                    return line
+            else:
+                time.sleep(self.READ_POLL_S)
+        return None
 
     def read_frame(self) -> Optional[dict]:
         """

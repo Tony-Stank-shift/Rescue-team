@@ -236,10 +236,13 @@ class TargetSelector:
                           world_map.get_core_supplies())
             if not candidates:
                 # fallback：选最近的
-                candidates = world_map.active_targets
+                # ⚠️ 必须用 selectable_targets（排除安全区内目标），不能用
+                #    active_targets —— 否则会选中已投放进安全区的物资去扑空
+                #    （2026-09-18 现场：车贴着禁区边缘干蹭）。
+                candidates = world_map.selectable_targets
         else:
-            # FREE_RUN：所有活跃目标
-            candidates = world_map.active_targets
+            # FREE_RUN：所有**可抓取**的活跃目标（安全区内的已被排除）
+            candidates = world_map.selectable_targets
 
         if not candidates:
             return None

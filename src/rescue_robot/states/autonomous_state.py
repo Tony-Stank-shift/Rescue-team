@@ -12,6 +12,7 @@ autonomous_state.py —— AUTONOMOUS 状态
 
 import logging
 import math
+import os
 import threading
 import time
 from datetime import datetime
@@ -161,10 +162,44 @@ class AutonomousState:
             self._transport.set_stop_callback(self._stop_chassis)
         # ② 套取视觉确认：本车没有"套住检测"传感器 → 用摄像头看套取框里有没有目标。
         #    只在真机摄像头可用时启用（Mock/无摄像头时保持"假设成功"，避免误判重试）。
-        if camera is not None:
+        #
+        # ⚠️⚠️ 2026-09-18 现场事故：**夹爪放下去了，却被视觉确认否掉**。
+        #    日志原样：
+        #        sleeve_lift: SERVO,LOWER 套住: 1 个目标
+        #        transport_pipeline: 视觉确认：套取框内未见目标 → 判为套取失败，将抬爪后退重试
+        #    夹爪下压后 1 秒内又被抬起 → 从外面看就是"它根本不下来抓"。
+        #    根因是 `Camera.SLEEVE_ROI` 仍是**旧夹爪**标的值，而夹爪 V2 换成了
+        #    150×100 方口、后方还有三块实心板（很可能把槽挡在相机视野外），
+        #    于是确认**永远**判"没套住" → 抬爪 → 后退 → 再试 → 整场白跑。
+        #
+        #    config 里本来就有 `Camera.SLEEVE_CONFIRM` 这个开关，注释也写着
+        #    "ROI 未标定/看不到槽时可先关掉"，但**全仓没有任何地方读取它**
+        #    （写了没接线）。这里把它接上：环境变量 `SLEEVE_CONFIRM=0` 或
+        #    YAML `camera.sleeve_confirm: false` 都能关，现场一条命令就能绕开。
+        _confirm_on = True
+        try:
+            from .. import config as _cfg
+            _confirm_on = bool(getattr(_cfg, "SLEEVE_CONFIRM", True))
+        except Exception:
+            pass
+        _env = os.environ.get("SLEEVE_CONFIRM", "").strip().lower()
+        if _env in ("0", "false", "no", "off"):
+            _confirm_on = False
+        elif _env in ("1", "true", "yes", "on"):
+            _confirm_on = True
+
+        if camera is not None and _confirm_on:
             self._transport.set_sleeve_confirm(self._perception.check_sleeve_occupied)
             self._transport.set_release_failed_callback(self._on_release_failed)
-            logger.info("已启用套取视觉确认（槽内 ROI 判据）")
+            logger.info("已启用套取视觉确认（槽内 ROI 判据）"
+                        "  ⚠️ 若出现『视觉确认：套取框内未见目标』反复重试，"
+                        "说明 SLEEVE_ROI 没按夹爪 V2 标定 → 用 SLEEVE_CONFIRM=0 先关掉")
+        elif camera is not None:
+            self._transport.set_release_failed_callback(self._on_release_failed)
+            logger.warning(
+                "⚠️ 套取视觉确认已**关闭**（SLEEVE_CONFIRM=0）→ 夹爪下压后即视为套住。"
+                "风险：槽内其实没东西时也会记一次装载（幻影送达）。"
+                "建议尽快用 tools/calibrate_sleeve_roi.py 标定 Camera.SLEEVE_ROI 后重新打开")
         else:
             logger.info("无摄像头：套取不启用视觉确认（按接住处理）")
 
@@ -195,6 +230,9 @@ class AutonomousState:
         # T2-23：主循环异常计数（可见性）
         self._loop_error_count = 0
         self._last_loop_error = ""
+        # 感知降级计数（见 `_run_once` 第 1 步）：视觉抛异常时本帧降级为无视觉，
+        # 不让异常逃出主循环。与 `_loop_error_count` 同款"累计 + 每 250 次再报"写法。
+        self._vision_error_count = 0
         # 上次位姿（串口无数据时保持）：初值 = 出发区位姿（见 on_enter 再次强制下发）
         self._pose: tuple = tuple(self._start_pose)
 
@@ -428,13 +466,22 @@ class AutonomousState:
         #   ① **时间到** → 权威终场，立即停车退出；
         #   ② 其它来源的 DONE → 必须**连续保持** DONE_CONFIRM_S 秒才执行；一旦不再
         #      DONE 就复位计时并继续比赛（保证可恢复）。
+        # ⚠️⚠️ 时钟必须在函数**开头无条件**取一次。
+        # 旧实现只在下面 `DONE 且时间未到` 分支里写 `now = time.time()`，
+        # 而第 613 行的 2Hz 诊断日志**无条件**使用 `now` —— 那个赋值让 `now`
+        # 变成局部变量，于是只要策略状态不是 DONE（比赛绝大多数时间都不是），
+        # 本函数**第一帧**就抛
+        #     UnboundLocalError: local variable 'now' referenced before assignment
+        # 后果：主控循环当场失效 —— 车靠 `_run_startup_backup()`（独立路径）倒车
+        # 进场后**一动不动**，紧接着被"无动作 15s"异常接管、每帧刷一个新航点。
+        # 2026-09-17 现场实测：222 个周期全空转，日志里只有 ESCAPE_MANEUVER 刷屏。
+        now = time.time()
         if self._decision.strategy_state == StrategyState.DONE:
             time_up = self._decision.time_remaining_s <= 0
             if time_up:
                 self._finish_match("比赛时间到")
                 return
             # 非时间到的 DONE：先观察，别急着停
-            now = time.time()
             if self._done_since is None:
                 self._done_since = now
                 logger.warning(
@@ -514,7 +561,25 @@ class AutonomousState:
                 logger.warning(f"读取摄像头失败: {e}")
                 frame = None
         # 必须把航向一起传下去：车体系→场地系要按 theta 旋转（否则目标定位随车头方向整体错位）
-        self._perception.update(frame=frame, robot_position=(x, y), robot_theta=theta)
+        #
+        # ⚠️⚠️ 视觉是**可降级子系统**，异常绝不允许逃出 `_run_once`。
+        # 旧实现直接裸调：摄像头掉线/解码失败/HSV 阶段任意一次抛异常都会跳过
+        # **本帧的决策 + 导航 + 转运 + 底盘下发**。`_main_loop` 虽然会吞掉异常
+        # 继续下一轮（且只打印第 1 次与每 250 次），但持续故障 = 整车停摆：
+        # 车一动不动，只剩"无动作 15s"异常在不停地刷保命绕圈航点
+        # （2026-09-17 现场日志就是这个形态）。
+        # 现在降级为"本帧没有视觉"：世界地图沿用上一帧，决策/导航/底盘照常跑，
+        # 车至少还能按已有地图继续比赛，而不是彻底失能。
+        try:
+            self._perception.update(frame=frame, robot_position=(x, y),
+                                    robot_theta=theta)
+        except Exception as e:
+            self._vision_error_count += 1
+            if self._vision_error_count == 1 or self._vision_error_count % 250 == 0:
+                logger.error(
+                    f"⚠️ 感知更新异常（累计 {self._vision_error_count} 次，"
+                    f"最近一次: {type(e).__name__}: {e}）→ 本帧降级为无视觉，"
+                    f"决策/导航/底盘继续（避免整车停摆）", exc_info=True)
 
         # ── 1b. 对方接触时长（T1-11）──
         # 旧实现从不上报：`perception_pipeline` 明明算出了 `contact_duration_s`（还带 7s 预警），
@@ -651,6 +716,31 @@ class AutonomousState:
     #: 正常行驶 50Hz 下每帧最多约 17mm（850mm/s × 0.02s），400mm 留足余量。
     POSE_JUMP_MM = 400.0
 
+    #: 新导航目标与当前目标距离小于此值就**不重设**（mm）。
+    #: 为什么必须有死区：目标点的视觉估计每帧都在抖（实测逐帧 5~95mm），
+    #: 而 `NavigationPipeline.set_target()` 每次调用都会把状态置回 `PLANNING`
+    #: —— **强制全量重规划**。现场日志里每秒几十条「新导航目标」，
+    #: A* 一直在重算，车走起来一冲一顿。
+    #: 取 100mm：与夹爪捕获半径同量级，比它小的目标移动不影响最终能否套住。
+    NAV_TARGET_DEADBAND_MM = 100.0
+
+    def _transport_owns_navigation(self) -> bool:
+        """转运管线此刻是否**自己掌控**导航目标（决策层不得覆盖）。
+
+        目前只有 :data:`TransportPhase.RETREAT`（套取失败后抬爪后退）属于这种：
+        它会把导航目标设成"目标反方向 RETREAT_MM 处"的后退点。
+        若允许决策层同时把目标改回"物资所在位置"，两边就会互相覆盖 ——
+        现场实测（2026-09-18）目标点在 (2618,423) 与 (2705,262) 之间来回跳，
+        车最后一路冲到场地角 (2913,53)，"后退 → 重新接近"这套重试从未真正完成。
+
+        注意 **APPROACHING 不算**：那一段本来就该由决策层把目标设成物资位置。
+        """
+        try:
+            from ..transport.transport_pipeline import TransportPhase
+            return self._transport.phase == TransportPhase.RETREAT
+        except Exception:
+            return False
+
     def _set_nav_target(self, pos) -> None:
         """设置导航目标（去重，避免每帧重复触发重规划）。"""
         if pos is None:
@@ -660,6 +750,19 @@ class AutonomousState:
         if time.time() < self._keepalive_until:
             logger.debug("保活窗口内 → 暂不接受决策引擎的新导航目标")
             return
+        # 转运管线正在自己掌控导航目标（后退重试）→ 决策层让位
+        if self._transport_owns_navigation():
+            logger.debug("转运 RETREAT 阶段 → 暂不接受决策引擎的新导航目标")
+            return
+        cur = self._navigation.target
+        if cur is not None:
+            # 死区去抖：抖动幅度小于阈值就不重设（见 NAV_TARGET_DEADBAND_MM）。
+            # 不做去抖的话每帧都会 set_target → 状态回 PLANNING → 全量重规划。
+            try:
+                if math.hypot(pos[0] - cur[0], pos[1] - cur[1]) < self.NAV_TARGET_DEADBAND_MM:
+                    return
+            except Exception:
+                pass
         if self._navigation.target != pos:
             # set_target 现在会在目标越界时**拒绝**并返回 False（S-NEW）：
             # 保持原目标不动、不报错，由调用方下一帧重试。这里记一次计数便于现场排查。
@@ -714,6 +817,67 @@ class AutonomousState:
                 self._perception.world_map.return_to_field(t.id)
             except Exception as e:
                 logger.warning(f"把目标 #{getattr(t, 'id', '?')} 放回场上失败: {e}")
+
+    # ---- 只读监视（供 monitoring/video_server 的状态面板使用） ----
+
+    def hud_snapshot(self) -> dict:
+        """返回当前状态快照 dict，用于实时画面叠加与网页状态栏。
+
+        **纯只读**：不写任何控制状态、不发任何指令、不做任何计算以外的副作用。
+        由 `monitoring/video_server` 的 HTTP 线程按需调用（默认 2Hz），
+        所以这里**必须足够快**，并且**任何字段缺失都要能容忍** ——
+        监视功能坏了也绝不允许影响比赛。
+        """
+        snap: dict = {}
+        try:
+            x, y, theta = self._pose
+            snap["pose"] = (float(x), float(y), math.degrees(float(theta)))
+        except Exception:
+            pass
+        try:
+            v, w = self._last_cmd
+            snap["cmd"] = (float(v), float(w))
+        except Exception:
+            pass
+        for key, attr in (("nav_state", "_navigation"), ("transport", "_transport")):
+            try:
+                obj = getattr(self, attr)
+                snap[key] = (obj.state.name if key == "nav_state"
+                             else obj.phase.name)
+            except Exception:
+                pass
+        try:
+            t = self._navigation.target
+            snap["nav_target"] = (float(t[0]), float(t[1])) if t else None
+        except Exception:
+            snap["nav_target"] = None
+        try:
+            snap["strategy"] = self._decision.strategy_state.name
+            snap["time_remaining"] = float(self._decision.time_remaining_s)
+        except Exception:
+            pass
+        try:
+            ids = list(self._transport.load_manager.state.target_ids)
+            snap["loaded_count"] = len(ids)
+        except Exception:
+            pass
+        # 世界地图里已确认的目标（把机器人"以为场上有啥"画出来）
+        try:
+            wm = self._perception.world_map
+            targets = []
+            for t in wm.active_targets:
+                targets.append({
+                    "x": float(t.position[0]), "y": float(t.position[1]),
+                    "type": getattr(getattr(t.info, "type", None), "name", "?"),
+                    "seen": int(getattr(t, "seen_count", 0)),
+                })
+            snap["targets"] = targets
+            snap["target_count"] = len(targets)
+        except Exception:
+            pass
+        snap["loop_errors"] = int(getattr(self, "_loop_error_count", 0))
+        snap["vision_errors"] = int(getattr(self, "_vision_error_count", 0))
+        return snap
 
     def _stop_chassis(self) -> None:
         """

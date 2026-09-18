@@ -132,9 +132,19 @@ class TargetClassifier:
         # 只有满足全部条件才允许：
         #   ① 该颜色在配置表里**只对应一种类型**（无色歧义）；
         #   ② 映射结果不是 DANGEROUS（绝不因形状判错而把东西判成危险目标）；
-        #   ③ 该颜色本身不是 LIGHT_BLUE（危险目标只认精确匹配）。
+        #   ③ 该颜色本身不是 LIGHT_BLUE（危险目标只认精确匹配）；
+        #   ④ **形状不是 UNKNOWN**（2026-09-18 新增）。
         # 旧的实现是无条件"同色任意形状"兜底 → 会把"蓝色 + 未匹配形状"直接判成
         # 浅蓝危险目标（救援目标永不被搬 = 丢分）。
+        #
+        # ④ 为什么必须加：兜底的初衷是"形状**判错**了，救回来"。而 UNKNOWN 表示
+        #    **根本没判出形状** —— 那就是一团没有物体轮廓的色块。
+        #    现场实测：同学的腿 `BLACK/UNKNOWN bbox=[407,289,77,191]` 就是这样一路
+        #    兜底成"核心物资"的。没有形状可言的色块，救回来的只可能是幻影目标。
+        if shape == TargetShape.UNKNOWN:
+            logger.debug(f"放弃同色兜底：形状未识别（color={color.name}）→ "
+                         f"无形状可言，不当物资")
+            return None
         infos_same_color = [info for (c, _s), info in self._config.items() if c == color]
         if (color != TargetColor.LIGHT_BLUE
                 and len(infos_same_color) == 1

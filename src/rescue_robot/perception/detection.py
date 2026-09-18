@@ -174,12 +174,81 @@ class CVDetector(AbstractDetector):
         self._image_size = tuple(image_size if image_size is not None
                                  else getattr(_cfg, "CAMERA_RES", (640, 480)))
 
+        # ── 由相机几何推出的两个"物理门限"（见 _plausible_ground_object）──
+        # 焦距（px）：f = (W/2) / tan(HFOV/2)。640×480 + 77° ⇒ f ≈ 402px。
+        _w_px, _h_px = self._image_size
+        self._f_px = (_w_px / 2.0) / math.tan(
+            math.radians(self._camera_fov_deg) / 2.0)
+        self._cx_px = _w_px / 2.0
+        self._cy_px = _h_px / 2.0
+        # 地平线所在行号：相机**下倾** tilt 度 ⇒ 地平线在光轴**上方** tilt 度，
+        # 即 v_h = cy - f·tan(tilt)（图像 v 向下增大）。
+        # 本项目（cy=240, f≈402, tilt=30°）⇒ v_h ≈ 8 行。
+        self._horizon_v = self._cy_px - self._f_px * math.tan(
+            math.radians(self._camera_tilt_deg))
+
         logger.info(f"CVDetector 初始化: phase={phase.name}, "
                      f"检测颜色={[c.name for c in self._colors_to_detect]}, "
                      f"相机 h={self._camera_height_mm:.0f}mm "
                      f"tilt={self._camera_tilt_deg:.1f}° "
                      f"fov={self._camera_fov_deg:.0f}° "
-                     f"res={self._image_size}")
+                     f"res={self._image_size} "
+                     f"f={self._f_px:.0f}px 地平线v={self._horizon_v:.0f}")
+
+    #: 贴地物资任意一边的名义上限（mm）。夹爪 V2 开口 150×100 ⇒ 物资必小于 100mm；
+    #: 取 120mm 留足余量（用于"像元尺寸 vs 测距"的交叉校验）。
+    TARGET_MAX_SIZE_MM = 120.0
+    #: 长宽比上限：地面物体在 30° 俯视图里会被纵向拉长，但拉不到 3 倍。
+    MAX_ASPECT_RATIO = 3.0
+    #: 越出地平线的容差（px）：允许一点点形态学膨胀造成的毛边。
+    HORIZON_MARGIN_PX = 4.0
+
+    def _plausible_ground_object(self, x: int, y: int, w: int, h: int) -> bool:
+        """这个轮廓**有没有可能**是"地面上站着的一个物资"？
+
+        ⚠️⚠️ 2026-09-18 现场：**同学的腿/脚被识别成"黑色正三棱锥"（置信度 0.75）**，
+        进而被"同色兜底"分类成核心物资 → 世界地图里冒出十几个幻影目标 →
+        车跑去扑空。下面三条判据全部**由相机几何推出**，不是拍脑袋的魔数：
+
+        ① **地平线以上不可能是贴地物体。**
+           相机下倾 tilt、焦距 f ⇒ 地平线在 v_h = cy - f·tan(tilt) 行
+           （本项目 640×480 + 77° + 30° ⇒ v_h ≈ 8 行）。
+           物资高 ≤120mm 而相机高 210mm ⇒ **物资顶端永远低于相机** ⇒
+           它的成像**永远落在地平线以下**。
+           反过来：任何越过地平线的轮廓（人腿、脚、墙、围栏、桌面）都**不可能**
+           是贴地物资 —— 实测那团 100×378 的"黑色三棱锥"顶边在 y=0，
+           比地平线还高 8 行，从几何上就不可能是地面上的东西。
+
+        ② **被画面左/右边缘裁掉的轮廓不能信。**
+           宽度未知 ⇒ 形状判定与地平面测距（用底边像素算距离）都会失真。
+           实测 `BLACK/CUBOID bbox=[0,426,81,54]` 就是贴着左边缘的。
+
+        ③ **长宽比离谱的不可能是贴地物体。**
+           30° 俯视会把物体纵向拉长，但拉不到 3 倍；实测那团腿是 378/100 = 3.8。
+
+        这三条都只**排除"不可能是物资"的形状**，不参与"是什么物资"的判断，
+        所以不会影响分类正确性；判据本身也不依赖 HSV 阈值（换光照不变）。
+        """
+        # ① 越过地平线
+        if y < self._horizon_v + self.HORIZON_MARGIN_PX:
+            logger.debug(f"丢弃轮廓：越过地平线 (y={y} < v_h+margin="
+                         f"{self._horizon_v + self.HORIZON_MARGIN_PX:.0f})，"
+                         f"贴地物资不可能成像在地平线以上")
+            return False
+        # ② 左右贴边（被裁掉）
+        w_img, _h_img = self._image_size
+        if x <= 1 or (x + w) >= (w_img - 1):
+            logger.debug(f"丢弃轮廓：被画面左右边缘裁掉 (x={x}, x+w={x + w}, "
+                         f"图宽={w_img})，宽度不可信")
+            return False
+        # ③ 长宽比
+        if h > 0 and w > 0:
+            aspect = max(w, h) / float(min(w, h))
+            if aspect > self.MAX_ASPECT_RATIO:
+                logger.debug(f"丢弃轮廓：长宽比 {aspect:.1f} > "
+                             f"{self.MAX_ASPECT_RATIO}（{w}×{h}），不可能是贴地物体")
+                return False
+        return True
 
     def _get_colors_to_detect(self) -> List[TargetColor]:
         """
@@ -252,6 +321,12 @@ class CVDetector(AbstractDetector):
 
                 # Bounding box
                 x, y, w, h = cv2.boundingRect(contour)
+
+                # ⚠️ "这个轮廓有没有可能是贴地物资"——由相机几何推出的三道门
+                #    （地平线/贴边/长宽比），详见 `_plausible_ground_object`。
+                #    不加这道门时，现场实测"同学的腿"会被当成黑色正三棱锥。
+                if not self._plausible_ground_object(x, y, w, h):
+                    continue
 
                 # 轮廓近似 → 顶点数
                 peri = cv2.arcLength(contour, True)

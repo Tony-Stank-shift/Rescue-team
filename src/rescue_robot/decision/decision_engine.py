@@ -958,6 +958,17 @@ class DecisionEngine:
         mid_hi = FIELD_CENTER_Y + self.EXPLORE_CENTER_KEEPOUT_MM
         lanes = (self._spread(lo, mid_lo) + self._spread(mid_hi, hi))
 
+        # ⚠️ 2026-09-18：车道顺序与首车道走向都取**离车更近的一端**。
+        # 旧实现固定从 `(x0, lanes[0])` 开始，实测车在 (1809,1326) 时第一个导航点
+        # 是 (300, 550) —— 车要先横穿 **1.7m** 去左下角才开始扫，
+        # 现场表现就是用户报的"没识别到物体，它一直往地图左下角跑"。
+        # 这样改**不改覆盖范围**（车道集合与每道的路点集合都没变），只是把
+        # "先走哪一头"从固定值改成跟着当前位姿走，蛇形结构保持不变。
+        if len(lanes) >= 2 and abs(lanes[-1] - ry) < abs(lanes[0] - ry):
+            lanes = list(reversed(lanes))
+        # 首车道从离车更近的 x 端开始，其后相邻车道照旧反向（蛇形）
+        start_from_right = rx > (FIELD_SIZE / 2.0)
+
         x0 = self.EXPLORE_X_MARGIN_MM
         x1 = FIELD_SIZE - self.EXPLORE_X_MARGIN_MM
         for i, ly in enumerate(lanes):
@@ -968,7 +979,8 @@ class DecisionEngine:
                 x += self.EXPLORE_WP_STEP_MM
             if xs and xs[-1] < x1 - 1e-6:
                 xs.append(x1)
-            if i % 2 == 1:          # 蛇形：奇数车道反向，减少来回横穿
+            # 蛇形：相邻车道反向；且第 0 条车道按上面的规则取更近的一端
+            if (i % 2 == 1) != start_from_right:
                 xs.reverse()
             for lx in xs:
                 if not self._is_in_any_safe_zone(lx, ly):

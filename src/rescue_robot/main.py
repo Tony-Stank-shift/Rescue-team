@@ -247,6 +247,7 @@ def main():
     # 提前声明：保证 finally 清理时一定存在（异常早退也不会 NameError）
     chassis = None
     camera = None
+    video_server = None
 
     try:
         # 创建硬件实例
@@ -411,6 +412,32 @@ def main():
 
         sm.set_state_change_callback(_on_state_change)
 
+        # ── 实时画面（内嵌 MJPEG，只读监视）──────────────────────────────
+        # 现场背景：RDK 没显示器、摄像头又只能被一个进程独占，所以"另开一个
+        # 看图程序"这条路走不通。这里在**主程序内**起一个只读 HTTP 服务，
+        # 直接推主循环正在用的那一帧（叠加检测框），浏览器即可看。
+        # 失败（端口被占/无 cv2/无摄像头）只记日志，**绝不影响比赛**。
+        video_server = None
+        try:
+            from .monitoring.video_server import MjpegServer
+            _vs_on = os.environ.get("VIDEO_STREAM", "1").strip().lower() \
+                not in ("", "0", "false", "no", "off")
+            if _vs_on:
+                video_server = MjpegServer(
+                    camera=camera,
+                    perception=perception,
+                    hud_provider=autonomous_state.hud_snapshot,
+                    port=int(os.environ.get("VIDEO_STREAM_PORT", "8080") or 8080),
+                    fps=float(os.environ.get("VIDEO_STREAM_FPS", "12") or 12),
+                )
+                if not video_server.start():
+                    video_server = None
+            else:
+                logger.info("VIDEO_STREAM=0 → 不启动实时画面")
+        except Exception as e:
+            logger.warning(f"实时画面初始化失败（不影响比赛）: {e}")
+            video_server = None
+
         # 处理 Ctrl+C
         shutdown_flag = threading.Event()
 
@@ -467,6 +494,12 @@ def main():
     finally:
         # 清理
         logger.info("正在清理资源...")
+        # 先停实时画面（它只是监视，先关掉避免推流线程继续抓帧）
+        try:
+            if video_server is not None:
+                video_server.stop()
+        except Exception:
+            pass
         try:
             button.stop_monitoring()
         except Exception:

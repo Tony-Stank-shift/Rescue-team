@@ -82,7 +82,40 @@ class WorldMap:
     """
 
     # 关联阈值：两个检测被视为同一目标的最大距离（mm）
+    #
+    # ⚠️⚠️ 2026-09-18 现场事故：固定 100mm **太紧**。
+    #     真机实测**同一个物体**的逐帧位置估计抖动就有 48~95mm：
+    #       run1 绿块：(698,1091)→(651,1103)→(641,1110)→(637,1113)→
+    #                   (579,1123)→(545,1119)→(536,1115)→(541,1110)→(533,1108)
+    #                   → 逐帧位移 48.5 / 12.2 / 5.0 / 58.9 / 34.2 / 9.8 / 7.1 / 8.2 mm
+    #       run3 绿块：(2039,393)→(1949,419) = **93.7mm**（距 100mm 只差 6mm！）
+    #     一旦某帧抖动超过阈值，数据关联就断链：该检测被判成"新目标"丢进待确认缓冲，
+    #     而 `hits` 永远攒不到 `MIN_SEEN_COUNT=3` → **目标永远不被确认** →
+    #     `active_targets` 里没有可抓的普通物资 → 决策层转探索 → 车开走。
+    #     现场表现就是用户报的："视野里明明识别出了绿色物体和橙色物体，车却不去抓"。
+    #
+    #     抖动的两个来源：
+    #       ① **地平面测距误差随距离平方增长**（`d = h/tan(θ_pixel)`，dd/dθ ∝ d²）；
+    #       ② 里程计位姿误差（车动/漂移时把物体搬到了别处）。
+    #     两者都随"物体离车多远"变大，所以阈值必须**随距离自适应**：
+    #       近处保持小阈值（避免把两个相邻的真实物体并成一个），
+    #       远处按比例放大（那里测距噪声本来就大到分不开）。
+    #: 基线阈值（近距离，mm）
     ASSOCIATION_DISTANCE_MM = 100.0
+    #: 相对项：gate = max(基线, 相对系数 × 车到目标距离)
+    #: 取 0.30 —— 500mm 处 150mm、1000mm 处 300mm、1500mm 处 450mm(封顶)，
+    #: 与实测抖动（约距离的 10%~20%）留了 1.5~3 倍余量。
+    ASSOCIATION_DISTANCE_REL = 0.30
+    #: 阈值上限（mm）：再远也不能无限放宽，否则会把两个真实物体并成一个。
+    ASSOCIATION_DISTANCE_MAX_MM = 450.0
+    #
+    # ⚠️ 还有一层容易被忽略的机制：`_offer_pending` 对候选位置做了 **50/50 平滑**
+    #    （`0.5*旧 + 0.5*新`），于是候选点每次都滞后于真实检测，下一次比较时
+    #    从"平滑后位置"到"新检测"的距离 ≈ **1.5 × 原始逐帧抖动**。
+    #    也就是说**有效容忍度只有阈值本身的约 2/3**：
+    #        阈值 100mm → 只能容忍 ≈66mm 的逐帧抖动。
+    #    这解释了为什么 run1（最大抖动 58.9mm）**侥幸**通过、run3（93.7mm）必挂。
+    #    改阈值时请按"抖动 × 1.5"来估，不要按阈值本身估。
 
     # 目标被确认成立所需的连续检测次数（新检测先入"待确认"缓冲，
     # 连续命中这么多次才升级为真目标）——用于过滤 HSV 单帧误检。
@@ -182,6 +215,29 @@ class WorldMap:
             return False
         return not self.is_in_safe_zone(t.position)
 
+    @property
+    def selectable_targets(self) -> List[TrackedTarget]:
+        """**可被抓取**的活跃目标（= ACTIVE 且不在安全区内）。
+
+        ⚠️⚠️ 凡是"要挑一个目标去抓"的地方，都必须走这里，**不要**用 `active_targets`。
+
+        为什么专门开这个访问器（2026-09-18 现场事故）：
+            `active_targets` **只过滤状态、不过滤安全区**。而 `_selectable()`
+            （它才排除安全区里的目标）此前只被 `get_regular_supplies()` 等
+            按类型取目标的接口用到。`target_selector` 在
+            **FREE_RUN** 与 **时间紧迫兜底** 两条路径上直接写了
+            `candidates = world_map.active_targets` → 于是：
+
+              首趟（FIRST_TRIP 走 get_regular_supplies，已过滤）一切正常；
+              **首趟投完之后**，安全区里已投放的物资重新变成可选目标 →
+              车开过去扑空；而导航的禁区又不允许开进安全区 →
+              目标点被钳制 → 车贴在禁区边缘以 `cmd v≈2mm/s` 干蹭十几秒。
+              现场表现就是用户报的："识别的都是安全区里的物体，这个不能抓"。
+
+        安全区里的物体**本来就不该抓**：可能是自己已投放的，也可能是对方的。
+        """
+        return [t for t in self._targets.values() if self._selectable(t)]
+
     def get_regular_supplies(self) -> List[TrackedTarget]:
         return [t for t in self.get_targets_by_type(TargetType.REGULAR_SUPPLY)
                 if self._selectable(t)]
@@ -256,6 +312,22 @@ class WorldMap:
 
     # ---- 更新循环 ----
 
+    def _assoc_gate(self, ref_position: Tuple[float, float],
+                    robot_position: Optional[Tuple[float, float]]) -> float:
+        """按"车到该目标的距离"自适应的数据关联阈值（mm）。
+
+        为什么随距离放宽：物体越远，地平面测距的相对误差越大（∝ d²），
+        里程计误差折算到物体位置上的横向放大也越大（∝ d）。固定阈值在远处
+        必然被噪声击穿 → 断链 → 目标永不确认（见 `ASSOCIATION_DISTANCE_MM`
+        的说明）。近处则保持小阈值，避免把两个相邻真实物体并成一个。
+        """
+        if robot_position is None:
+            return self.ASSOCIATION_DISTANCE_MM
+        d = self._distance(ref_position, robot_position)
+        return min(self.ASSOCIATION_DISTANCE_MAX_MM,
+                   max(self.ASSOCIATION_DISTANCE_MM,
+                       self.ASSOCIATION_DISTANCE_REL * d))
+
     def update(self, detected_targets: List[DetectedTarget],
                robot_position: Tuple[float, float] = (0, 0),
                timestamp: float = 0.0,
@@ -290,7 +362,7 @@ class WorldMap:
 
         for new_idx, det in enumerate(detected_targets):
             best_match = None
-            best_distance = self.ASSOCIATION_DISTANCE_MM
+            best_dist: Optional[float] = None
 
             for track_id, tracked in self._targets.items():
                 if track_id in matched_existing:
@@ -298,9 +370,14 @@ class WorldMap:
                 if tracked.info.type != det.info.type:
                     continue  # 类型不同不匹配
 
+                # 每个已有目标用**它自己**的自适应阈值（抖动随它离车的距离变大），
+                # 但要先过阈值、再按**真实距离**取最近邻 —— 不能拿阈值比大小。
+                gate = self._assoc_gate(tracked.position, robot_position)
                 dist = self._distance(tracked.position, det.position)
-                if dist < best_distance:
-                    best_distance = dist
+                if dist > gate:
+                    continue
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
                     best_match = track_id
 
             if best_match is not None:
@@ -315,7 +392,7 @@ class WorldMap:
         for new_idx, det in enumerate(detected_targets):
             if new_idx in matched_new:
                 continue
-            self._offer_pending(det, timestamp)
+            self._offer_pending(det, timestamp, robot_position)
 
         # 步骤 4：移除过时目标
         # ⚠️ **不能只看丢失帧数**。救援目标是贴地的静止物体，看不见 ≠ 不存在。
@@ -370,20 +447,28 @@ class WorldMap:
                 alive.append(p)
         self._pending = alive
 
-    def _offer_pending(self, det: DetectedTarget, timestamp: float) -> None:
+    def _offer_pending(self, det: DetectedTarget, timestamp: float,
+                       robot_position: Optional[Tuple[float, float]] = None) -> None:
         """
         把"未匹配到已有目标"的检测并入待确认缓冲。
 
         同一个候选连续被检测到 MIN_SEEN_COUNT 次才升级为真目标；
         这样单帧 HSV 误检不会立刻变成可被决策选中的目标。
+
+        ⚠️ 这里同样必须用**自适应阈值**：这个函数是"目标能不能被确认"的最后一关，
+        固定 100mm 会让超过 100mm 的逐帧抖动把 `hits` 永远卡在 1~2 —— 目标
+        永远建不出来，现场表现就是"看到了却不去抓"（见 `ASSOCIATION_DISTANCE_MM`）。
         """
         best = None
-        best_dist = self.ASSOCIATION_DISTANCE_MM
+        best_dist = None
         for p in self._pending:
             if p["info"].type != det.info.type:
                 continue
+            gate = self._assoc_gate(p["position"], robot_position)
             d = self._distance(p["position"], det.position)
-            if d < best_dist:
+            if d > gate:
+                continue
+            if best_dist is None or d < best_dist:
                 best_dist = d
                 best = p
 

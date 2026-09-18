@@ -403,6 +403,18 @@ class PerceptionPipeline:
 
     # ---- 查询 ----
 
+    @property
+    def last_detections(self) -> List[Detection]:
+        """最近一帧原始检测结果（**只读**）。
+
+        仅供只读监视（``monitoring/video_server`` 叠加检测框）与诊断使用。
+        为什么暴露它：真机排查"为什么把安全区里的东西当成物资"这类问题时，
+        **必须能看见检测器实际切出了什么** —— 只看日志里的分类结论永远查不出
+        是检测框位置错、还是颜色阈值错、还是形状判错。
+        调用方不得修改返回的列表内容。
+        """
+        return list(self._last_detections)
+
     def get_stats(self) -> dict:
         """获取感知管线统计"""
         avg_latency = (self._total_latency_ms / self._frame_count

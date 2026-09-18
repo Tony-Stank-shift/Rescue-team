@@ -97,6 +97,9 @@ class NavigationPipeline:
         self._replan_interval = 30  # 每 30 帧（0.6s）重规划一次
         self._close_range_mm = 150.0  # 接近段：距目标小于此值时直接精确接近
 
+        # 被障碍包住时的脱离计数器（见 `_escape_from_obstacle`）
+        self._escape_frames = 0
+
         # 统计
         self._total_distance = 0.0
         self._frame_count = 0
@@ -194,6 +197,16 @@ class NavigationPipeline:
     CAUTION_DIST_MM = 150.0
     #: 预警带内的速度比例。
     CAUTION_SPEED_RATIO = 0.5
+
+    # ---- 被障碍包住时的果断脱离（2026-09-18 现场：2mm/s 干蹭十几秒）--------
+    #: 局部规划器输出低于此速度（mm/s）即视为"规划器冻住"（不是真的想慢走）。
+    STUCK_CMD_MM_S = 40.0
+    #: 脱离动作的速度（mm/s，负=倒车）
+    ESCAPE_SPEED_MM_S = 180.0
+    #: 连续脱离帧数上限（50Hz 下 150 帧 ≈ 3s、约 500mm）。
+    #: 超过就交回规划器 —— 防止"障碍其实是真实对手"时一路倒出场。
+    ESCAPE_MAX_FRAMES = 150
+
     #: BLOCKED 状态下的最小重规划间隔（秒）。T2-2：旧实现每帧重规划（最坏 15.3ms/帧）。
     BLOCKED_REPLAN_S = 0.5
     PULL_STEP_MM = 25.0
@@ -463,6 +476,7 @@ class NavigationPipeline:
             cmd = self._motion.track_path(self._current_path, current_pose, dt=dt)
 
             # 局部避障修正
+            escaping = False
             if self._is_near_obstacle(current_pose):
                 best_vw = self._local_planner.plan(
                     current_pose, (cmd.linear, cmd.angular),
@@ -473,14 +487,49 @@ class NavigationPipeline:
                     timestamp=time.time(),
                 )
                 self._state = NavState.AVOIDING
+                # ⚠️⚠️ 防"被障碍包住时冻住"（2026-09-18 现场）。
+                # `_is_near_obstacle` 只看"车附近有没有高代价格子"。当障碍圆
+                # **把车自己包在里面**时（实测对手圆半径 350mm，而"对手"被检测到
+                # 离车仅 139mm），所有候选速度的代价都很差，规划器的"最优"就退化成
+                # "几乎不动" —— 现场实测连续 9 秒 `cmd v=2~18mm/s`，而目标在 2.4m 外。
+                # 而车不动 → 障碍位置估计不变 → **永远出不来**，形成死锁。
+                # 物理上正确的做法是**先离开这片高代价区域**：倒车 + 朝目标转向。
+                if abs(cmd.linear) < self.STUCK_CMD_MM_S:
+                    self._escape_frames += 1
+                    if self._escape_frames <= self.ESCAPE_MAX_FRAMES:
+                        escaping = True
+                        cmd = self._escape_from_obstacle(current_pose, cmd)
+                        if self._escape_frames == 1:
+                            logger.warning(
+                                f"⚠️ 局部规划器只给出 {best_vw[0]:+.0f}mm/s（<"
+                                f"{self.STUCK_CMD_MM_S:.0f}）→ 判定被障碍包住，"
+                                f"改为果断倒车脱离（最多 {self.ESCAPE_MAX_FRAMES} 帧）")
+                    # 超过上限就不再倒车（否则可能一路倒出场），交回规划器
+                else:
+                    # 规划器给出了正常速度 = 没被包住 → 计数复位。
+                    # ⚠️ 复位必须**同时**放在这里和"附近没障碍"分支：安全区/场地边界
+                    #    的代价是**永久写进代价地图**的，车沿安全区走时
+                    #    `_is_near_obstacle` 恒为 True（只是不"冻住"），
+                    #    只在 else 分支复位的话计数会一直涨，跑满上限后
+                    #    **脱离功能永久失效**（自检 scenario 4 抓到的就是这个）。
+                    self._escape_frames = 0
             else:
+                self._escape_frames = 0
                 self._state = NavState.MOVING
 
             # T1-15：硬禁区**预警带减速**。旧实现只有"已经进入禁区"的事后反应
             # （此时 -5 分/次的判罚已成立、进对方安全区更是比赛结束），而现成的
             # `get_violation_warning()`（150mm 预警）**零生产调用**。
             # 这里在预警带内主动把速度压到一半，给倒车规避留出反应距离。
-            cmd = self._apply_caution(cmd, current_pose)
+            #
+            # ⚠️ 但**脱离倒车不减速**：它只在"车被障碍包住、规划器冻住"时触发，
+            #    是**有时限**（≤ESCAPE_MAX_FRAMES ≈3s）的主动撤离。砍半会让
+            #    3 秒只退出 270mm，不足以离开 350mm 的障碍圆 → 撞上限后放弃 → 还是卡住
+            #    （自检 scenario 1 实测：-180mm/s 被压到 -90mm/s）。
+            #    这与第 343 行"进禁区倒车 -200mm/s"的处理一致 —— 应急撤离动作
+            #    不受预警带减速约束。
+            if not escaping:
+                cmd = self._apply_caution(cmd, current_pose)
 
             self._total_distance += abs(cmd.linear) * dt
             self._localizer.update(cmd.linear, cmd.angular, dt)
@@ -540,6 +589,31 @@ class NavigationPipeline:
                 self._current_path.pop(0)
             else:
                 break
+
+    def _escape_from_obstacle(self, current_pose: Tuple[float, float, float],
+                              planned: VelocityCommand) -> VelocityCommand:
+        """被障碍物包住时的果断脱离：**倒车 + 朝目标转向**。
+
+        为什么不"接着用规划器那个小速度"：
+            规划器是在代价地图上选最优 ``(v, w)``；当车**已经位于高代价格子内部**
+            时，所有候选的代价都很差，"最优"退化成"几乎不动"（现场 2~18mm/s）。
+            继续用它 = 车不动 → 障碍估计不变 → 死锁。
+            物理上唯一有效的动作是**先离开这片高代价区域**，所以这里直接给一个
+            确定的倒车速度，同时把车头朝目标方向转，避免脱离后绕远路。
+
+        上限保护：连续脱离不会超过 :data:`ESCAPE_MAX_FRAMES` 帧（50Hz 下 ≈3s、
+        约 500mm），之后交回规划器 —— 防止障碍是**真实**的（比如对手真的挡在
+        前面）时一路倒出场。
+        """
+        # 朝向误差：车头 vs 目标（角度归一化到 [-π, π]）
+        angular = 0.0
+        if self._target is not None:
+            desired = math.atan2(self._target[1] - current_pose[1],
+                                 self._target[0] - current_pose[0])
+            err = (desired - current_pose[2] + math.pi) % (2 * math.pi) - math.pi
+            angular = max(-1.5, min(1.5, 1.5 * err))
+        return VelocityCommand(linear=-self.ESCAPE_SPEED_MM_S,  # 负 = 倒车
+                               angular=angular, timestamp=time.time())
 
     def _is_near_obstacle(self, current_pose: Tuple[float, float, float]) -> bool:
         cx, cy, _ = current_pose

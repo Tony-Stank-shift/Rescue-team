@@ -308,7 +308,20 @@ class SystemChecker:
         self._items.append(item)
 
         # IMU
-        item = self._run_check("IMU", self._hw.check_imu, critical=True)
+        # ⚠️ 默认**非致命**（只报警不阻断），与固件的降级策略保持一致：
+        #    固件侧 `MPU6050_Init` 失败已改为"在无 IMU 的情况下继续运行"
+        #    （遥测里 IMU 行自动跳过，ODOM/TEL 照发），定位退化为**纯轮式里程计**
+        #    （少了陀螺仪修正，长距离会漂）。上位机若仍在这里硬阻断，
+        #    就出现"固件允许跑、上位机不让跑"的自相矛盾，整场直接报废。
+        #    实测 2026-09-17：串口只剩 ODOM/TEL，IMU 行数为 0 → 自检 FAIL → 车拒绝启动。
+        #    需要恢复"没有 IMU 就不许启动"的严格行为时：设 REQUIRE_IMU=1。
+        _imu_critical = os.environ.get("REQUIRE_IMU", "").strip() not in ("", "0", "false", "no")
+        item = self._run_check("IMU", self._hw.check_imu, critical=_imu_critical)
+        if item.status == CheckStatus.FAIL and not _imu_critical:
+            logger.warning("⚠️⚠️ IMU 未检出：本场将**只用轮式里程计定位**（无陀螺仪修正），"
+                           "长距离/多次转向后航向会漂 → 落点精度下降。"
+                           "请优先检查 MPU6050 接线（SCL→PB10 / SDA→PB11 / VCC / GND）。"
+                           "如需严格模式（无 IMU 拒绝启动）请设 REQUIRE_IMU=1")
         self._items.append(item)
 
         # 温度传感器（非关键）
