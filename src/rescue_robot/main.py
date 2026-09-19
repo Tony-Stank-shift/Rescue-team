@@ -253,6 +253,18 @@ def main():
     _mismatch = zone_team_color_mismatch(start_zone, _team_color)
     if _mismatch:
         logger.error(_mismatch)
+    else:
+        # 一致时也要**明确打一行**：现场需要的是"我怎么知道填对了"的答案，
+        # 只在出错时才说话的设计会让人一直不确定（今天这场就是被这个坑掉的）。
+        try:
+            _z = int(start_zone)
+            _side = "下半场（3/4 号区）" if _z in (3, 4) else "上半场（1/2 号区）"
+            _where = ("底部中央" if _team_color == SafeZoneColor.BLUE
+                      else "顶部中央")
+            logger.info(f"出发区 {_z} 号在{_side} → 本队安全区 {_team_color.name}"
+                        f"（{_where}）与场地几何一致 ✅")
+        except Exception:
+            pass
 
 
 def zone_team_color_mismatch(start_zone, team_color) -> str:
