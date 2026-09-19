@@ -34,6 +34,10 @@ SCRIPTS = [
     ("ASSOC  世界地图数据关联：真实抖动序列能确认 / 不过度合并 / 安全区不被选中", "verify_worldmap_association.py"),
     ("DEADLK 导航被障碍包住：果断脱离 / 有上限 / 不误触发 / 可恢复", "verify_nav_deadlock.py"),
     ("GROUND 贴地物体几何门：腿/贴边/细长被拒 + 真物资150~1100mm不误杀", "verify_detector_ground_gates.py"),
+    # ⚠️ 真跑 main() 启动路径。加它的原因：我在 main() 里插检查时写错变量位置，
+    #    程序启动即 NameError 崩溃，而当时 16 项闸门**全绿** —— 没有任何一项
+    #    会执行 main()。这一项专门守"启动路径"这一层。
+    ("STARTUP 启动冒烟：真跑 main() 不崩 + 走到 BOOT + 出发区↔颜色确认/告警", "verify_startup_smoke.py"),
 ]
 
 
