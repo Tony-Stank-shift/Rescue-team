@@ -416,6 +416,50 @@ def scenario_nav_target_deadband(ev):
     return None
 
 
+def scenario_zone_team_color(ev):
+    """★ 出发区半场与本队安全区颜色的一致性防呆（8 种组合）。
+
+    为什么必须有：两者不一致时车会**开到场地的另一头**把物资送进对方安全区 ——
+    一次判错整场报废，而且日志里原来只有一句"请与现场实际颜色核对"，很容易滑过去。
+    2026-09-18 现场一直是 `START_ZONE=4` + `TEAM_COLOR=red`（4 号区在右下角，
+    按几何本队安全区应是底部蓝区），没人发现。
+
+    另外这条护栏还要抓"反向建议"：告警里给出的"正确命令"必须是
+    **按几何应该用的那个值**，不能是用户当前值的反面乱猜 —— 我第一次就写反了。
+    """
+    from rescue_robot.main import zone_team_color_mismatch
+    from rescue_robot.perception.field_elements import SafeZoneColor as C
+
+    # (出发区, 颜色, 是否应该告警)
+    cases = [(1, C.RED, False), (1, C.BLUE, True),
+             (2, C.RED, False), (2, C.BLUE, True),
+             (3, C.BLUE, False), (3, C.RED, True),
+             (4, C.BLUE, False), (4, C.RED, True)]
+    for z, c, should_warn in cases:
+        msg = zone_team_color_mismatch(z, c)
+        if bool(msg) != should_warn:
+            return (f"出发区 {z} + {c.name} 的判定错了："
+                    f"{'应告警却没' if should_warn else '不该告警却'}告警")
+
+    # 反向建议检查：告警里推荐的 TEAM_COLOR 必须与几何一致
+    for z, wrong in ((4, C.RED), (3, C.RED), (1, C.BLUE), (2, C.BLUE)):
+        msg = zone_team_color_mismatch(z, wrong)
+        want = "blue" if z in (3, 4) else "red"
+        if f"TEAM_COLOR={want} START_ZONE={z}" not in msg:
+            return (f"出发区 {z} 的告警没有给出正确的启动命令"
+                    f"（应含 TEAM_COLOR={want} START_ZONE={z}）→ "
+                    f"反向建议会把现场引到更错的方向")
+        if f"TEAM_COLOR={wrong.name.lower()} START_ZONE={z} ./run.sh" in msg:
+            return f"出发区 {z} 的告警把用户当前（错误的）值当成正确命令推荐了"
+
+    # 未知区号不许乱告警（避免把非法输入变成噪声）
+    if zone_team_color_mismatch("abc", C.RED) != "":
+        return "非法出发区号也产生了告警 → 会变成噪声"
+    ev.append("出发区↔安全区颜色：8 种组合判定正确，"
+              "且告警给出的正确命令方向无误（含反向建议检查）")
+    return None
+
+
 SCENARIOS = (
     ("非DONE+无目标(事故工况)", scenario_non_done_no_target),
     ("非DONE+有目标", scenario_non_done_with_target),
@@ -425,6 +469,7 @@ SCENARIOS = (
     ("感知抛异常", scenario_perception_raises),
     ("转运RETREAT期间导航目标不被抢", scenario_transport_owns_nav),
     ("导航目标死区去抖", scenario_nav_target_deadband),
+    ("出发区↔安全区颜色一致性防呆", scenario_zone_team_color),
 )
 
 

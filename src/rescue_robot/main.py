@@ -244,6 +244,48 @@ def main():
                 f"（TEAM_COLOR={os.environ.get('TEAM_COLOR', 'red')!r}）"
                 f"  ⚠️ 请与现场实际颜色核对：判错 = 全场物资运进对方安全区")
 
+    # ── 出发区半场 vs 本队安全区颜色：一致性防呆 ──────────────────────────
+    # 场地几何是死的：出发区 1/2 在**上半场**、3/4 在**下半场**；
+    # 而**红安全区在顶部中央（y 2670~2970）、蓝安全区在底部中央（y 30~330）**。
+    # 两者不一致时，车会**开到场地的另一头**把物资送进对方区 —— 一次判错整场报废。
+    # 2026-09-18 现场一直是 `START_ZONE=4` + `TEAM_COLOR=red` 这个组合，
+    # 而 4 号区在右下角、本队安全区应在下方（蓝）—— 直到人为指出才发现。
+    _mismatch = zone_team_color_mismatch(start_zone, _team_color)
+    if _mismatch:
+        logger.error(_mismatch)
+
+
+def zone_team_color_mismatch(start_zone, team_color) -> str:
+    """出发区所在半场与本队安全区颜色不一致时，返回告警文本；一致返回 ""。
+
+    判据（纯场地几何，见 ``perception/field_elements.py``）：
+      · 出发区 1（左上）/2（右上）在**上半场** ⇒ 本队安全区应为 **顶部红区**；
+      · 出发区 3（左下）/4（右下）在**下半场** ⇒ 本队安全区应为 **底部蓝区**。
+
+    ⚠️ 只**告警不阻断**：配对关系来自场地几何（不是软件能确证的赛规条文），
+    万一现场有特殊安排，阻断会把本可跑的比赛拒掉。所以大声提示、由人确认。
+    """
+    try:
+        z = int(start_zone)
+    except Exception:
+        return ""
+    expect_blue = z in (3, 4)
+    is_blue = (team_color == SafeZoneColor.BLUE)
+    if expect_blue == is_blue:
+        return ""
+    zone_side = "下半场（3/4 号区）" if expect_blue else "上半场（1/2 号区）"
+    expect_name = "BLUE（底部中央）" if expect_blue else "RED（顶部中央）"
+    # 按场地几何**应该**用的那个值（不是用户当前给的那个，也不是它的反面乱猜）
+    correct_flag = "blue" if expect_blue else "red"
+    return (f"🚨 出发区与本队安全区颜色**可能不匹配**："
+            f"出发区 {z} 号在{zone_side}，按场地几何本队安全区应是 {expect_name}，"
+            f"而当前 TEAM_COLOR 给的是 {team_color.name}。\n"
+            f"    按场地几何，正确的启动命令是："
+            f"TEAM_COLOR={correct_flag} START_ZONE={z} ./run.sh\n"
+            f"    若现场规则确实要求送 {team_color.name} 区（另一个半场的区），"
+            f"那就保持现状、忽略本条 —— 但请先和队友确认一次。\n"
+            f"    送错区 = 全场物资进对方安全区。**请现场核对后再决定是否继续**。")
+
     # 提前声明：保证 finally 清理时一定存在（异常早退也不会 NameError）
     chassis = None
     camera = None

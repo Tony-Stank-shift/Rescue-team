@@ -63,7 +63,9 @@ def main() -> int:
                     help="场地里那个已知坐标的物资的颜色")
     ap.add_argument("--target-x", type=float, default=None)
     ap.add_argument("--target-y", type=float, default=None)
-    ap.add_argument("--color", default="red", choices=("red", "blue"),
+    ap.add_argument("--color",
+                    default=os.environ.get("TEAM_COLOR", "blue").strip().lower(),
+                    choices=("red", "blue"),
                     help="本队安全区颜色")
     ap.add_argument("--frames", type=int, default=25,
                     help="喂给感知的帧数（要 ≥3 才能通过世界地图的确认门槛）")

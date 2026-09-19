@@ -67,7 +67,8 @@ cd ~/rescue
 **不用 `start.sh` 也可以**（等价写法）：
 
 ```bash
-cd ~/rescue && TEAM_COLOR=red START_ZONE=4 ./run.sh     # 朝向自动推导
+cd ~/rescue && TEAM_COLOR=blue START_ZONE=4 ./run.sh    # 朝向自动推导
+# ⚠️ 4 号区在**下半场** → 本队安全区是**底部蓝区**（红区在顶部中央）；填错 = 送进对方区
 ```
 
 也可以完全手工指定启动参数（详见 RUNBOOK §1.7.1）：

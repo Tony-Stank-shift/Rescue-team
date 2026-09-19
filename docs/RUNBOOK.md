@@ -211,7 +211,8 @@ PYTHONPATH=src python3 -m rescue_robot.main
 | `CAM_INDEX` | `get_camera_index()` / `_DEFAULT_CAM_INDEX` | `0` | 摄像头序号 | 自检与采集**共用同一个函数**，默认值一致（旧文档说的 0/1 不一致已不成立） |
 | `CAM_WARMUP_S` | `main()` 摄像头预热 `float(os.environ.get("CAM_WARMUP_S", "3.0"))` | `3.0` | 首帧超时；超时 → 摄像头判不可用 → 感知降级 Mock | 见 `wait_first_frame` 调用处 |
 | `SKIP_CAMERA_CHECK` | `system_check.py` 内 `os.environ.get("SKIP_CAMERA_CHECK", ...)` | 未设（=检查） | `1/true/yes` → 跳过摄像头自检项 | 只影响**自检**，不影响采集 |
-| `TEAM_COLOR` | `main()` 内 `resolve_team_color()` | `red` | 本队安全区颜色 | 抽签后必改；无法识别即**拒绝启动** |
+| `TEAM_COLOR` | `main()` 内 `resolve_team_color()` | `red` | 本队安全区颜色 | 抽签后必改；无法识别即**拒绝启动**。
+**必须与出发区半场一致**：1/2 号区→`red`（顶部），3/4 号区→`blue`（底部）；不一致会打 🚨 告警 |
 
 **启动后的正常日志（对不上就是有问题）**
 ```
@@ -303,7 +304,9 @@ cd ~/rescue && ./start.sh 2 蓝          # 2 号区出发、本队蓝队（中�
 
 等价的原始写法（不想用 `start.sh` 时）：
 ```bash
-cd ~/rescue && TEAM_COLOR=red START_ZONE=4 ./run.sh      # 朝向自动推导
+cd ~/rescue && TEAM_COLOR=blue START_ZONE=4 ./run.sh     # 朝向自动推导
+# ⚠️ 4 号区在**下半场**，本队安全区是**底部蓝区**（红区在顶部中央）→ TEAM_COLOR=blue。
+#    填错 = 全场物资送进对方安全区。程序启动时会做「出发区↔颜色」一致性检查并大声告警。
 ```
 
 #### 为什么要自动化这个角度
@@ -330,7 +333,7 @@ cd ~/rescue && TEAM_COLOR=red START_ZONE=4 ./run.sh      # 朝向自动推导
 ```bash
 ./start.sh 4 red -45        # 第三个参数 = 实测车头朝向，优先级最高
 # 或
-START_ZONE=4 TEAM_COLOR=red START_HEADING_DEG=-45 ./run.sh
+START_ZONE=4 TEAM_COLOR=blue START_HEADING_DEG=-45 ./run.sh
 ```
 
 `START_HEADING_DEG` 优先级高于自动推导；填了非法值（如 `abc`）会**报错并回落到
@@ -726,7 +729,7 @@ PYTHONPATH=src python3 tools/hw_selftest.py --duration 5       # 遥测/速度�
 export RUN_MODE=real           # 已是代码默认值，写出来只为现场一眼确认
 export CHASSIS_PORT=/dev/ttyS1 # 已是代码默认值；只有电脑 USB-TTL 调试才需要改成 /dev/ttyUSB0
 export CAM_INDEX=0
-export TEAM_COLOR=red          # 抽签结果
+export TEAM_COLOR=blue         # 抽签结果：1/2 号区→red（顶部），3/4 号区→blue（底部）
 export CAM_WARMUP_S=3.0
 # export SKIP_CAMERA_CHECK=1   # 仅台架无摄像头时打开
 

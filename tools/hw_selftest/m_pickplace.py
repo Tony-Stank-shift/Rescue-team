@@ -11,7 +11,8 @@
     A 找绿色   —— 摄像头 + 感知，直到世界地图里出现**已确认**的绿色普通物资
     B 走过去   —— 真实导航到该坐标（用下位机里程计位姿）
     C 抓住     —— 显式停车 → SERVO,LOWER → **槽内视觉确认**
-    D 送安全区 —— 导航到**红色安全区物资区**中心 (1345, 2820)
+    D 送安全区 —— 导航到**本队**安全区物资区中心（由 TEAM_COLOR 决定：
+                    红方 (1345, 2820) / 蓝方 (1655, 180)）
     E 放下     —— SERVO,RAISE
 
 ⚠️ 会驱动电机与舵机，必须 `--yes-motion`。跑之前请确认：
@@ -24,16 +25,29 @@
 """
 
 import math
+import os
 import time
 from typing import Optional
 
 from .framework import register, ok, bad, skip
 
 MODULE = "pickplace"
-TITLE = "端到端：识别绿色物资 → 抓住 → 放进红色安全区"
+#: 投放点由 TEAM_COLOR 决定（红 (1345,2820) / 蓝 (1655,180)），见 run() 内。
+TITLE = "端到端：识别绿色物资 → 抓住 → 放进本队安全区（TEAM_COLOR 决定红/蓝）"
 
-#: 红色安全区**物资区**中心（x[1200,1490] y[2670,2970]）—— 与 run.sh 实跑日志一致
-RED_SUPPLY_AREA = (1345.0, 2820.0)
+def _team_color():
+    """本队安全区颜色：**只认 TEAM_COLOR 环境变量，没有默认值**。
+
+    为什么不留默认值（2026-09-18 教训）：送到哪个安全区是**方向上完全相反**的两件事，
+    送错等于把物资全送进对方区。给个"默认红方"只会让漏设环境变量时静默跑错方向，
+    所以这里宁可 SKIP 也不猜。
+    """
+    v = os.environ.get("TEAM_COLOR", "").strip().lower()
+    if v.startswith("b"):
+        return "blue"
+    if v.startswith("r"):
+        return "red"
+    return None
 
 FIND_TIMEOUT_S = 30.0        # A 阶段：找绿色的最长时间
 GOTO_TIMEOUT_S = 60.0        # B/D 阶段：导航最长时间
@@ -48,6 +62,15 @@ def run(ctx):
         return gate
 
     ev = []
+    team = _team_color()
+    if team is None:
+        return skip(MODULE,
+                    "未设置 TEAM_COLOR（red/blue）→ 不知道该送哪个安全区，拒绝猜",
+                    ev,
+                    "本队送蓝方安全区时：TEAM_COLOR=blue "
+                    "PYTHONPATH=src python3 tools/hw_selftest.py --only pickplace --yes-motion")
+    ev.append(f"本队安全区 = {team.upper()}（TEAM_COLOR={team}）")
+
     chassis, err = ctx.open_chassis()
     if err is not None:
         return err
@@ -81,9 +104,18 @@ def run(ctx):
     ev.append("摄像头：首帧已到 ✅")
 
     field = FieldLayout.standard()
-    perception = PerceptionPipeline(use_mock=False, my_safe_zone_color=SafeZoneColor.RED)
-    nav = NavigationPipeline(field_layout=field, my_safe_zone_color=SafeZoneColor.RED,
+    my_color = (SafeZoneColor.BLUE if team == "blue" else SafeZoneColor.RED)
+    perception = PerceptionPipeline(use_mock=False, my_safe_zone_color=my_color)
+    nav = NavigationPipeline(field_layout=field, my_safe_zone_color=my_color,
                              use_mock=False)
+    # 投放点**直接问生产代码**（DecisionEngine 的同一条取值路径），
+    # 不在测试里再写一份常量 —— 否则生产改了方向、测试还在测旧方向。
+    from rescue_robot.decision.decision_engine import DecisionEngine
+    from rescue_robot.perception.world_map import WorldMap
+    supply_area = DecisionEngine(WorldMap(field_layout=field),
+                                 my_color=my_color)._get_supply_area_position()
+    ev.append(f"投放点={supply_area}（取自 DecisionEngine._get_supply_area_position，"
+              f"与生产同源）")
     sleeve = SerialServoLift(chassis)
 
     # 坐标基准：把车**现在停的位置**当作场心 (1500,1500)、车头朝 +Y。
@@ -196,10 +228,10 @@ def run(ctx):
         return bad(MODULE, "C 阶段失败：夹爪没有执行 LOWER（舵机命令被拒或串口不通）",
                    ev, "先跑 `--only servo`")
 
-    # ─────────────── D. 送红色安全区 ───────────────
-    dx, dy = RED_SUPPLY_AREA
+    # ─────────────── D. 送本队安全区 ───────────────
+    dx, dy = supply_area
     got2, d2 = drive_to(dx, dy, GOTO_TIMEOUT_S)
-    ev.append(f"D 送红色安全区物资区 ({dx:.0f},{dy:.0f}) "
+    ev.append(f"D 送本队({team})安全区物资区 ({dx:.0f},{dy:.0f}) "
               f"{'✅' if got2 else '❌'} 距目标 {d2:.0f}mm")
 
     # ─────────────── E. 放下 ───────────────
@@ -215,7 +247,8 @@ def run(ctx):
     cam.stop()
 
     if not got2:
-        return bad(MODULE, f"D 阶段失败：没能把物资送到红色安全区（还差 {d2:.0f}mm）",
+        return bad(MODULE, f"D 阶段失败：没能把物资送到本队({team})安全区"
+                           f"（还差 {d2:.0f}mm）",
                    ev, "看日志里的导航状态；安全区边缘是禁区，目标点被钳制到区外属正常")
     if confirmed is False:
         return bad(MODULE, "链路走通了，但**槽内视觉确认判为没套住** → 实际没抓住",
@@ -223,4 +256,4 @@ def run(ctx):
                    "⚠️ 这正是 2026-09-18 现场那次：夹爪下压了却被确认否掉。"
                    "先跑 tools/calibrate_sleeve_roi.py 按夹爪 V2 标定 SLEEVE_ROI；"
                    "标定不了就用 SLEEVE_CONFIRM=0 关掉确认")
-    return ok(MODULE, "端到端通过：绿色物资已识别、走到跟前、套取并送进红色安全区", ev)
+    return ok(MODULE, f"端到端通过：绿色物资已识别、走到跟前、套取并送进{team}方安全区", ev)

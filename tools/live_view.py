@@ -42,7 +42,9 @@ def main() -> int:
     ap.add_argument("--cam", type=int, default=0)
     ap.add_argument("--save", default="", help="存一张叠加图后退出")
     ap.add_argument("--seconds", type=float, default=5.0)
-    ap.add_argument("--color", default="red", choices=("red", "blue"),
+    ap.add_argument("--color",
+                    default=os.environ.get("TEAM_COLOR", "blue").strip().lower(),
+                    choices=("red", "blue"),
                     help="本队安全区颜色（影响禁区/安全区判定）")
     args = ap.parse_args()
 
